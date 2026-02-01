@@ -126,13 +126,17 @@ export default function DashboardPage() {
             </div>
 
             {loading ? (
-                <p>Loading projects...</p>
-            ) : projects.length === 0 ? (
                 <Card>
-                    <CardHeader>
-                        <CardTitle>No projects yet</CardTitle>
-                        <CardDescription>Create your first project to get started.</CardDescription>
-                    </CardHeader>
+                    <CardContent className="pt-6 text-center">
+                        <p className="text-gray-500">Loading your projects...</p>
+                    </CardContent>
+                </Card>
+            ) : projects.length === 0 ? (
+                <Card className="border-dashed">
+                    <CardContent className="pt-6 text-center">
+                        <p className="text-gray-500 mb-2">🎯 No projects yet!</p>
+                        <p className="text-sm text-gray-400">Create your first project above to get started</p>
+                    </CardContent>
                 </Card>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
