@@ -7,6 +7,8 @@ import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
 import { useTranslation } from "react-i18next"
 
+const MAX_COMMENT_LENGTH = 500
+
 interface Comment {
     id: string
     content: string
@@ -18,7 +20,7 @@ export function CommentSection({ taskId }: { taskId: string }) {
     const [comments, setComments] = useState<Comment[]>([])
     const [newComment, setNewComment] = useState("")
     const [loading, setLoading] = useState(false)
-    const { i18n } = useTranslation()
+    const { i18n, t } = useTranslation()
     const messagesEndRef = useRef<null | HTMLDivElement>(null)
 
     useEffect(() => {
@@ -134,15 +136,27 @@ export function CommentSection({ taskId }: { taskId: string }) {
                 }
                 <div ref={messagesEndRef} />
             </div>
-            <form onSubmit={handlePostComment} className="flex gap-2">
-                <Input
-                    value={newComment}
-                    onChange={(e) => setNewComment(e.target.value)}
-                    placeholder="Type a comment..."
-                    disabled={loading}
-                />
-                <Button type="submit" disabled={loading}>Send</Button>
-            </form>
+            <div className="space-y-2">
+                <div className="flex gap-2">
+                    <Input
+                        value={newComment}
+                        onChange={(e) => setNewComment(e.target.value.slice(0, MAX_COMMENT_LENGTH))}
+                        placeholder={t("typeComment")}
+                        className="flex-1"
+                    />
+                    <Button
+                        onClick={handlePostComment}
+                        disabled={loading || newComment.trim().length === 0}
+                    >
+                        {loading ? t("loading") : t("send")}
+                    </Button>
+                </div>
+                <p className="text-xs text-gray-500 text-right">
+                    {newComment.length}/{MAX_COMMENT_LENGTH} characters
+                </p>
+            </div>
         </div>
     )
 }
+
+export default CommentSection
