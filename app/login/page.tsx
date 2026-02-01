@@ -15,6 +15,20 @@ export default function LoginPage() {
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault()
+
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        if (!emailRegex.test(email)) {
+            alert("Please enter a valid email address")
+            return
+        }
+
+        // Validate password length
+        if (password.length < 6) {
+            alert("Password must be at least 6 characters")
+            return
+        }
+
         setLoading(true)
         const { error } = await supabase.auth.signInWithPassword({
             email,
@@ -22,7 +36,7 @@ export default function LoginPage() {
         })
 
         if (error) {
-            alert(error.message)
+            alert(`Login failed: ${error.message}`)
         } else {
             router.push("/dashboard")
         }
