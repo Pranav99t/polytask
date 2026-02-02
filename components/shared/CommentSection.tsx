@@ -1,11 +1,12 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, useCallback } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useTranslation } from "react-i18next"
-import { Send, User, Globe } from "lucide-react"
+import { Send, Globe } from "lucide-react"
+import { useToast } from "@/components/ui/toast"
 
 const MAX_COMMENT_LENGTH = 500
 
@@ -31,78 +32,106 @@ export function CommentSection({ taskId }: { taskId: string }) {
     const { i18n, t } = useTranslation()
     const messagesEndRef = useRef<null | HTMLDivElement>(null)
     const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+    const { showError } = useToast()
+
+    // Prevent duplicate submissions
+    const isSubmittingRef = useRef(false)
+    // Track if component is mounted
+    const isMountedRef = useRef(true)
+
+    useEffect(() => {
+        isMountedRef.current = true
+        return () => { isMountedRef.current = false }
+    }, [])
 
     useEffect(() => {
         const getCurrentUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser()
-            if (user) {
-                setCurrentUserId(user.id)
+            try {
+                const { data: { user } } = await supabase.auth.getUser()
+                if (user && isMountedRef.current) {
+                    setCurrentUserId(user.id)
+                }
+            } catch (error) {
+                console.error("Error getting user:", error)
             }
         }
         getCurrentUser()
     }, [])
 
-    const fetchComments = async () => {
-        setFetchingComments(true)
-
-        const { data: commentsData, error } = await supabase
-            .from("comments")
-            .select("*")
-            .eq("task_id", taskId)
-            .order("created_at", { ascending: true })
-
-        if (error) {
-            console.error(error)
-            setFetchingComments(false)
-            return
-        }
-
-        if (!commentsData?.length) {
-            setComments([])
-            setFetchingComments(false)
-            return
-        }
-
-        // Fetch user profiles for comment authors
-        const authorIds = [...new Set(commentsData.map(c => c.author_id))]
-        const { data: usersData } = await supabase
-            .from("users")
-            .select("id, email")
-            .in("id", authorIds)
-
-        const usersMap: Record<string, UserProfile> = {}
-        usersData?.forEach(u => {
-            usersMap[u.id] = u
-        })
-        setUsers(usersMap)
-
-        // Fetch translations for current locale
-        const commentIds = commentsData.map(c => c.id)
-        const { data: translations } = await supabase
-            .from("comment_translations")
-            .select("comment_id, translated_content")
-            .in("comment_id", commentIds)
-            .eq("locale", i18n.language)
-
-        // Merge comments with translations
-        const mergedComments = commentsData.map(c => {
-            const translation = translations?.find(tr => tr.comment_id === c.id)
-            return {
-                ...c,
-                content: translation ? translation.translated_content : c.content
-            }
-        })
-
-        setComments(mergedComments)
-        setFetchingComments(false)
-        scrollToBottom()
-    }
-
-    const scrollToBottom = () => {
+    const scrollToBottom = useCallback(() => {
         setTimeout(() => {
             messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
         }, 100)
-    }
+    }, [])
+
+    const fetchComments = useCallback(async (showLoading = true) => {
+        if (showLoading) setFetchingComments(true)
+
+        try {
+            const { data: commentsData, error } = await supabase
+                .from("comments")
+                .select("*")
+                .eq("task_id", taskId)
+                .order("created_at", { ascending: true })
+
+            if (error) {
+                console.error(error)
+                if (isMountedRef.current) setFetchingComments(false)
+                return
+            }
+
+            if (!isMountedRef.current) return
+
+            if (!commentsData?.length) {
+                setComments([])
+                setFetchingComments(false)
+                return
+            }
+
+            // Fetch user profiles for comment authors
+            const authorIds = [...new Set(commentsData.map(c => c.author_id))]
+            const { data: usersData } = await supabase
+                .from("users")
+                .select("id, email")
+                .in("id", authorIds)
+
+            if (!isMountedRef.current) return
+
+            const usersMap: Record<string, UserProfile> = {}
+            usersData?.forEach(u => {
+                usersMap[u.id] = u
+            })
+            setUsers(usersMap)
+
+            // Fetch translations for current locale
+            const commentIds = commentsData.map(c => c.id)
+            const { data: translations } = await supabase
+                .from("comment_translations")
+                .select("comment_id, translated_content")
+                .in("comment_id", commentIds)
+                .eq("locale", i18n.language)
+
+            if (!isMountedRef.current) return
+
+            // Merge comments with translations
+            const mergedComments = commentsData.map(c => {
+                const translation = translations?.find(tr => tr.comment_id === c.id)
+                return {
+                    ...c,
+                    content: translation ? translation.translated_content : c.content
+                }
+            })
+
+            setComments(mergedComments)
+            setFetchingComments(false)
+            scrollToBottom()
+        } catch (error) {
+            console.error("Error fetching comments:", error)
+            if (isMountedRef.current) {
+                setFetchingComments(false)
+            }
+        }
+    }, [taskId, i18n.language, scrollToBottom])
 
     useEffect(() => {
         fetchComments()
@@ -114,14 +143,16 @@ export function CommentSection({ taskId }: { taskId: string }) {
                 'postgres_changes',
                 { event: 'INSERT', schema: 'public', table: 'comments', filter: `task_id=eq.${taskId}` },
                 () => {
-                    fetchComments()
+                    // Refetch without loading indicator for new comments
+                    fetchComments(false)
                 }
             )
             .on(
                 'postgres_changes',
                 { event: 'DELETE', schema: 'public', table: 'comments', filter: `task_id=eq.${taskId}` },
-                () => {
-                    fetchComments()
+                (payload) => {
+                    // Remove deleted comment optimistically
+                    setComments(prev => prev.filter(c => c.id !== (payload.old as Comment).id))
                 }
             )
             .subscribe()
@@ -133,7 +164,8 @@ export function CommentSection({ taskId }: { taskId: string }) {
                 'postgres_changes',
                 { event: 'INSERT', schema: 'public', table: 'comment_translations' },
                 () => {
-                    fetchComments()
+                    // Only refetch if there's a new translation for current locale
+                    fetchComments(false)
                 }
             )
             .subscribe()
@@ -142,39 +174,68 @@ export function CommentSection({ taskId }: { taskId: string }) {
             supabase.removeChannel(channel)
             supabase.removeChannel(translationChannel)
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [taskId, i18n.language])
+    }, [taskId, i18n.language, fetchComments])
 
     const handlePostComment = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (!newComment.trim()) return
 
+        // Prevent duplicate submissions
+        if (isSubmittingRef.current || loading || !newComment.trim()) return
+
+        isSubmittingRef.current = true
         setLoading(true)
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) {
-            setLoading(false)
-            return
-        }
 
-        // Call our API route to handle insertion and translation
-        const res = await fetch('/api/comments', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                taskId,
-                content: newComment.trim(),
-                userId: user.id
+        try {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                setLoading(false)
+                isSubmittingRef.current = false
+                return
+            }
+
+            // Store comment text before clearing
+            const commentText = newComment.trim()
+
+            // Optimistically add the comment
+            const optimisticComment: Comment = {
+                id: `temp-${Date.now()}`,
+                content: commentText,
+                created_at: new Date().toISOString(),
+                author_id: user.id,
+            }
+
+            setComments(prev => [...prev, optimisticComment])
+            setNewComment("") // Clear input immediately for better UX
+            scrollToBottom()
+
+            // Call our API route to handle insertion and translation
+            const res = await fetch('/api/comments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    taskId,
+                    content: commentText,
+                    userId: user.id
+                })
             })
-        })
 
-        if (!res.ok) {
-            const data = await res.json()
-            alert(data.error || "Failed to post comment")
-        } else {
-            setNewComment("")
-            // Realtime will handle the update
+            if (!res.ok) {
+                // Rollback on error
+                setComments(prev => prev.filter(c => c.id !== optimisticComment.id))
+                setNewComment(commentText) // Restore the comment text
+                const data = await res.json()
+                showError(data.error || "Failed to post comment")
+            }
+            // Success case: realtime subscription will update with the real comment
+        } catch (error) {
+            console.error("Error posting comment:", error)
+            showError("Failed to post comment")
+        } finally {
+            if (isMountedRef.current) {
+                setLoading(false)
+            }
+            isSubmittingRef.current = false
         }
-        setLoading(false)
     }
 
     const formatTime = (dateString: string) => {
@@ -221,11 +282,12 @@ export function CommentSection({ taskId }: { taskId: string }) {
                     comments.map(comment => {
                         const isOwn = comment.author_id === currentUserId
                         const author = users[comment.author_id]
+                        const isOptimistic = comment.id.startsWith('temp-')
 
                         return (
                             <div
                                 key={comment.id}
-                                className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}
+                                className={`flex ${isOwn ? 'justify-end' : 'justify-start'} ${isOptimistic ? 'opacity-70' : ''}`}
                             >
                                 <div className={`flex gap-2 max-w-[80%] ${isOwn ? 'flex-row-reverse' : ''}`}>
                                     {/* Avatar */}
@@ -245,12 +307,21 @@ export function CommentSection({ taskId }: { taskId: string }) {
                                             <p className="text-sm whitespace-pre-wrap break-words">{comment.content}</p>
                                         </div>
                                         <div className={`flex items-center gap-2 mt-1 text-xs text-gray-400 ${isOwn ? 'justify-end' : ''}`}>
-                                            <span>{formatTime(comment.created_at)}</span>
-                                            {i18n.language !== 'en' && (
-                                                <span className="flex items-center gap-0.5">
-                                                    <Globe className="w-3 h-3" />
-                                                    <span>Translated</span>
+                                            {isOptimistic ? (
+                                                <span className="flex items-center gap-1">
+                                                    <div className="w-3 h-3 border border-gray-400 border-t-transparent rounded-full animate-spin" />
+                                                    Sending...
                                                 </span>
+                                            ) : (
+                                                <>
+                                                    <span>{formatTime(comment.created_at)}</span>
+                                                    {i18n.language !== 'en' && (
+                                                        <span className="flex items-center gap-0.5">
+                                                            <Globe className="w-3 h-3" />
+                                                            <span>Translated</span>
+                                                        </span>
+                                                    )}
+                                                </>
                                             )}
                                         </div>
                                     </div>
@@ -272,6 +343,13 @@ export function CommentSection({ taskId }: { taskId: string }) {
                             placeholder={t("typeComment")}
                             className="pr-12 py-6 rounded-xl border-gray-200 focus:border-violet-400 focus:ring-violet-400"
                             disabled={loading}
+                            onKeyDown={(e) => {
+                                // Submit on Enter (but not Shift+Enter)
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault()
+                                    handlePostComment(e)
+                                }
+                            }}
                         />
                         <div className="absolute right-3 top-1/2 -translate-y-1/2">
                             <Button
