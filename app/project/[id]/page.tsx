@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, use } from "react"
+import { useEffect, useState, use, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
@@ -35,6 +35,7 @@ import {
     MessageSquare,
     Settings2
 } from "lucide-react"
+import { useToast } from "@/components/ui/toast"
 
 interface Task {
     id: string
@@ -108,33 +109,53 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const [activeMenu, setActiveMenu] = useState<string | null>(null)
 
     const router = useRouter()
+    const { showSuccess, showError, showLoading, hideToast } = useToast()
 
-    const fetchProjectAndTasks = async () => {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) {
-            router.push("/login")
-            return
+    // Prevent duplicate operations
+    const operationLockRef = useRef(false)
+
+    const fetchProjectAndTasks = useCallback(async (showLoadingState = true) => {
+        try {
+            if (showLoadingState) setLoading(true)
+
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                router.replace("/login")
+                return
+            }
+
+            // Fetch Project and Tasks in parallel
+            const [projectResult, tasksResult] = await Promise.all([
+                supabase
+                    .from("projects")
+                    .select("*")
+                    .eq("id", resolvedParams.id)
+                    .single(),
+                supabase
+                    .from("tasks")
+                    .select("*")
+                    .eq("project_id", resolvedParams.id)
+                    .order("created_at", { ascending: false })
+            ])
+
+            if (projectResult.error) {
+                console.error("Error fetching project:", projectResult.error)
+            } else {
+                setProject(projectResult.data)
+            }
+
+            if (tasksResult.error) {
+                console.error("Error fetching tasks:", tasksResult.error)
+            } else {
+                setTasks(tasksResult.data || [])
+            }
+        } catch (error) {
+            console.error("Fetch error:", error)
+            showError("Failed to load project data")
+        } finally {
+            setLoading(false)
         }
-
-        // Fetch Project
-        const { data: projectData } = await supabase
-            .from("projects")
-            .select("*")
-            .eq("id", resolvedParams.id)
-            .single()
-
-        setProject(projectData)
-
-        // Fetch Tasks
-        const { data: tasksData } = await supabase
-            .from("tasks")
-            .select("*")
-            .eq("project_id", resolvedParams.id)
-            .order("created_at", { ascending: false })
-
-        setTasks(tasksData || [])
-        setLoading(false)
-    }
+    }, [resolvedParams.id, router, showError])
 
     useEffect(() => {
         fetchProjectAndTasks()
@@ -145,8 +166,17 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             .on(
                 'postgres_changes',
                 { event: '*', schema: 'public', table: 'tasks', filter: `project_id=eq.${resolvedParams.id}` },
-                () => {
-                    fetchProjectAndTasks()
+                (payload) => {
+                    // Handle realtime updates without full refetch
+                    if (payload.eventType === 'INSERT') {
+                        setTasks(prev => [payload.new as Task, ...prev])
+                    } else if (payload.eventType === 'UPDATE') {
+                        setTasks(prev => prev.map(t =>
+                            t.id === (payload.new as Task).id ? (payload.new as Task) : t
+                        ))
+                    } else if (payload.eventType === 'DELETE') {
+                        setTasks(prev => prev.filter(t => t.id !== (payload.old as Task).id))
+                    }
                 }
             )
             .subscribe()
@@ -154,10 +184,18 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         return () => {
             supabase.removeChannel(channel)
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [resolvedParams.id])
+    }, [resolvedParams.id, fetchProjectAndTasks])
 
-    const validateTitle = (title: string) => {
+    // Close menu when clicking outside
+    useEffect(() => {
+        const handleClickOutside = () => setActiveMenu(null)
+        if (activeMenu) {
+            document.addEventListener('click', handleClickOutside)
+            return () => document.removeEventListener('click', handleClickOutside)
+        }
+    }, [activeMenu])
+
+    const validateTitle = useCallback((title: string) => {
         if (!title.trim()) {
             setTitleError("Task title is required")
             return false
@@ -168,102 +206,203 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         }
         setTitleError("")
         return true
-    }
+    }, [])
 
     const handleCreateTask = async () => {
+        if (operationLockRef.current || saving) return
         if (!validateTitle(newTaskTitle)) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
+        const loadingToast = showLoading("Creating task...")
 
-        const { error } = await supabase.from("tasks").insert({
-            project_id: resolvedParams.id,
-            title: newTaskTitle.trim(),
-            description: newTaskDesc.trim(),
-            status: newTaskStatus,
-            assigned_to: user.id
-        })
+        try {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                hideToast(loadingToast)
+                router.replace("/login")
+                return
+            }
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setCreateOpen(false)
-            setNewTaskTitle("")
-            setNewTaskDesc("")
-            setNewTaskStatus('todo')
+            const { data, error } = await supabase
+                .from("tasks")
+                .insert({
+                    project_id: resolvedParams.id,
+                    title: newTaskTitle.trim(),
+                    description: newTaskDesc.trim(),
+                    status: newTaskStatus,
+                    assigned_to: user.id
+                })
+                .select()
+                .single()
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                // Optimistic update - add to list immediately
+                setTasks(prev => [data, ...prev])
+                setCreateOpen(false)
+                setNewTaskTitle("")
+                setNewTaskDesc("")
+                setNewTaskStatus('todo')
+                setTitleError("")
+                showSuccess("Task created successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Create error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleUpdateTask = async () => {
+        if (operationLockRef.current || saving) return
         if (!selectedTask || !validateTitle(editTitle)) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("tasks")
-            .update({
-                title: editTitle.trim(),
-                description: editDesc.trim(),
-                status: editStatus,
-            })
-            .eq("id", selectedTask.id)
+        const loadingToast = showLoading("Updating task...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setEditOpen(false)
+        try {
+            const { data, error } = await supabase
+                .from("tasks")
+                .update({
+                    title: editTitle.trim(),
+                    description: editDesc.trim(),
+                    status: editStatus,
+                })
+                .eq("id", selectedTask.id)
+                .select()
+                .single()
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                // Optimistic update
+                setTasks(prev => prev.map(t => t.id === selectedTask.id ? data : t))
+                setEditOpen(false)
+                setTitleError("")
+                showSuccess("Task updated successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Update error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleDeleteTask = async () => {
+        if (operationLockRef.current || saving) return
         if (!selectedTask) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("tasks")
-            .delete()
-            .eq("id", selectedTask.id)
+        const loadingToast = showLoading("Deleting task...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setDeleteOpen(false)
+        try {
+            const { error } = await supabase
+                .from("tasks")
+                .delete()
+                .eq("id", selectedTask.id)
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                // Optimistic update
+                setTasks(prev => prev.filter(t => t.id !== selectedTask.id))
+                setDeleteOpen(false)
+                showSuccess("Task deleted successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Delete error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleQuickStatusChange = async (task: Task, newStatus: 'todo' | 'in-progress' | 'done') => {
-        const { error } = await supabase
-            .from("tasks")
-            .update({ status: newStatus })
-            .eq("id", task.id)
+        if (operationLockRef.current) return
 
-        if (error) {
-            alert(error.message)
+        // Optimistic update first
+        setTasks(prev => prev.map(t =>
+            t.id === task.id ? { ...t, status: newStatus } : t
+        ))
+        setActiveMenu(null)
+
+        try {
+            const { error } = await supabase
+                .from("tasks")
+                .update({ status: newStatus })
+                .eq("id", task.id)
+
+            if (error) {
+                // Rollback on error
+                setTasks(prev => prev.map(t =>
+                    t.id === task.id ? { ...t, status: task.status } : t
+                ))
+                showError(error.message)
+            }
+        } catch (error) {
+            // Rollback on error
+            setTasks(prev => prev.map(t =>
+                t.id === task.id ? { ...t, status: task.status } : t
+            ))
+            showError("Failed to update status")
+            console.error("Status update error:", error)
         }
     }
 
     const handleUpdateProject = async () => {
+        if (operationLockRef.current || saving) return
         if (!project || !editProjectName.trim()) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("projects")
-            .update({
-                name: editProjectName.trim(),
-                description: editProjectDesc.trim(),
-            })
-            .eq("id", project.id)
+        const loadingToast = showLoading("Updating project...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setEditProjectOpen(false)
-            fetchProjectAndTasks()
+        try {
+            const { data, error } = await supabase
+                .from("projects")
+                .update({
+                    name: editProjectName.trim(),
+                    description: editProjectDesc.trim(),
+                })
+                .eq("id", project.id)
+                .select()
+                .single()
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                setProject(data)
+                setEditProjectOpen(false)
+                showSuccess("Project updated successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Update error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const openEditDialog = (task: Task, e: React.MouseEvent) => {
@@ -272,6 +411,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         setEditTitle(task.title)
         setEditDesc(task.description || "")
         setEditStatus(task.status)
+        setTitleError("")
         setEditOpen(true)
         setActiveMenu(null)
     }
@@ -281,6 +421,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         setSelectedTask(task)
         setDeleteOpen(true)
         setActiveMenu(null)
+    }
+
+    const handleCreateOpenChange = (open: boolean) => {
+        setCreateOpen(open)
+        if (!open) {
+            setNewTaskTitle("")
+            setNewTaskDesc("")
+            setNewTaskStatus('todo')
+            setTitleError("")
+        }
     }
 
     const groupedTasks = {
@@ -347,7 +497,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     </div>
                 </div>
 
-                <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+                <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
                     <DialogTrigger asChild>
                         <Button className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 shadow-lg shadow-violet-200">
                             <Plus className="mr-2 h-4 w-4" /> Add Task
@@ -360,63 +510,76 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                 Add a new task to this project.
                             </DialogDescription>
                         </DialogHeader>
-                        <div className="grid gap-4 py-4">
-                            <div className="space-y-2">
-                                <Label htmlFor="task-title">
-                                    Title <span className="text-red-500">*</span>
-                                </Label>
-                                <Input
-                                    id="task-title"
-                                    value={newTaskTitle}
-                                    onChange={(e) => {
-                                        setNewTaskTitle(e.target.value)
-                                        if (titleError) validateTitle(e.target.value)
-                                    }}
-                                    placeholder="e.g., Design landing page mockup"
-                                    className={titleError ? "border-red-500" : ""}
-                                />
-                                {titleError && (
-                                    <p className="text-sm text-red-500">{titleError}</p>
-                                )}
+                        <form onSubmit={(e) => { e.preventDefault(); handleCreateTask(); }}>
+                            <div className="grid gap-4 py-4">
+                                <div className="space-y-2">
+                                    <Label htmlFor="task-title">
+                                        Title <span className="text-red-500">*</span>
+                                    </Label>
+                                    <Input
+                                        id="task-title"
+                                        value={newTaskTitle}
+                                        onChange={(e) => {
+                                            setNewTaskTitle(e.target.value)
+                                            if (titleError) validateTitle(e.target.value)
+                                        }}
+                                        placeholder="e.g., Design landing page mockup"
+                                        className={titleError ? "border-red-500" : ""}
+                                        disabled={saving}
+                                        autoFocus
+                                    />
+                                    {titleError && (
+                                        <p className="text-sm text-red-500">{titleError}</p>
+                                    )}
+                                </div>
+                                <div className="space-y-2">
+                                    <Label htmlFor="task-desc">Description</Label>
+                                    <Input
+                                        id="task-desc"
+                                        value={newTaskDesc}
+                                        onChange={(e) => setNewTaskDesc(e.target.value)}
+                                        placeholder="Add more details..."
+                                        disabled={saving}
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>Status</Label>
+                                    <Select
+                                        value={newTaskStatus}
+                                        onValueChange={(v) => setNewTaskStatus(v as typeof newTaskStatus)}
+                                        disabled={saving}
+                                    >
+                                        <SelectTrigger>
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="todo">To Do</SelectItem>
+                                            <SelectItem value="in-progress">In Progress</SelectItem>
+                                            <SelectItem value="done">Done</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
                             </div>
-                            <div className="space-y-2">
-                                <Label htmlFor="task-desc">Description</Label>
-                                <Input
-                                    id="task-desc"
-                                    value={newTaskDesc}
-                                    onChange={(e) => setNewTaskDesc(e.target.value)}
-                                    placeholder="Add more details..."
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <Label>Status</Label>
-                                <Select
-                                    value={newTaskStatus}
-                                    onValueChange={(v) => setNewTaskStatus(v as typeof newTaskStatus)}
+                            <DialogFooter>
+                                <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={saving}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    type="submit"
+                                    disabled={saving}
+                                    className="bg-gradient-to-r from-violet-600 to-indigo-600"
                                 >
-                                    <SelectTrigger>
-                                        <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        <SelectItem value="todo">To Do</SelectItem>
-                                        <SelectItem value="in-progress">In Progress</SelectItem>
-                                        <SelectItem value="done">Done</SelectItem>
-                                    </SelectContent>
-                                </Select>
-                            </div>
-                        </div>
-                        <DialogFooter>
-                            <Button variant="outline" onClick={() => setCreateOpen(false)}>
-                                Cancel
-                            </Button>
-                            <Button
-                                onClick={handleCreateTask}
-                                disabled={saving}
-                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                            >
-                                {saving ? "Creating..." : "Create Task"}
-                            </Button>
-                        </DialogFooter>
+                                    {saving ? (
+                                        <span className="flex items-center gap-2">
+                                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                            Creating...
+                                        </span>
+                                    ) : (
+                                        "Create Task"
+                                    )}
+                                </Button>
+                            </DialogFooter>
+                        </form>
                     </DialogContent>
                 </Dialog>
             </div>
@@ -495,7 +658,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                                                         onClick={(e) => {
                                                                             e.stopPropagation()
                                                                             handleQuickStatusChange(task, 'todo')
-                                                                            setActiveMenu(null)
                                                                         }}
                                                                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                                                     >
@@ -507,7 +669,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                                                         onClick={(e) => {
                                                                             e.stopPropagation()
                                                                             handleQuickStatusChange(task, 'in-progress')
-                                                                            setActiveMenu(null)
                                                                         }}
                                                                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                                                     >
@@ -519,7 +680,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                                                         onClick={(e) => {
                                                                             e.stopPropagation()
                                                                             handleQuickStatusChange(task, 'done')
-                                                                            setActiveMenu(null)
                                                                         }}
                                                                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                                                     >
@@ -565,61 +725,73 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             Update task details.
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="grid gap-4 py-4">
-                        <div className="space-y-2">
-                            <Label htmlFor="edit-title">
-                                Title <span className="text-red-500">*</span>
-                            </Label>
-                            <Input
-                                id="edit-title"
-                                value={editTitle}
-                                onChange={(e) => {
-                                    setEditTitle(e.target.value)
-                                    if (titleError) validateTitle(e.target.value)
-                                }}
-                                className={titleError ? "border-red-500" : ""}
-                            />
-                            {titleError && (
-                                <p className="text-sm text-red-500">{titleError}</p>
-                            )}
+                    <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(); }}>
+                        <div className="grid gap-4 py-4">
+                            <div className="space-y-2">
+                                <Label htmlFor="edit-title">
+                                    Title <span className="text-red-500">*</span>
+                                </Label>
+                                <Input
+                                    id="edit-title"
+                                    value={editTitle}
+                                    onChange={(e) => {
+                                        setEditTitle(e.target.value)
+                                        if (titleError) validateTitle(e.target.value)
+                                    }}
+                                    className={titleError ? "border-red-500" : ""}
+                                    disabled={saving}
+                                />
+                                {titleError && (
+                                    <p className="text-sm text-red-500">{titleError}</p>
+                                )}
+                            </div>
+                            <div className="space-y-2">
+                                <Label htmlFor="edit-desc">Description</Label>
+                                <Input
+                                    id="edit-desc"
+                                    value={editDesc}
+                                    onChange={(e) => setEditDesc(e.target.value)}
+                                    disabled={saving}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label>Status</Label>
+                                <Select
+                                    value={editStatus}
+                                    onValueChange={(v) => setEditStatus(v as typeof editStatus)}
+                                    disabled={saving}
+                                >
+                                    <SelectTrigger>
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="todo">To Do</SelectItem>
+                                        <SelectItem value="in-progress">In Progress</SelectItem>
+                                        <SelectItem value="done">Done</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="edit-desc">Description</Label>
-                            <Input
-                                id="edit-desc"
-                                value={editDesc}
-                                onChange={(e) => setEditDesc(e.target.value)}
-                            />
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Status</Label>
-                            <Select
-                                value={editStatus}
-                                onValueChange={(v) => setEditStatus(v as typeof editStatus)}
+                        <DialogFooter>
+                            <Button type="button" variant="outline" onClick={() => setEditOpen(false)} disabled={saving}>
+                                Cancel
+                            </Button>
+                            <Button
+                                type="submit"
+                                disabled={saving}
+                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
                             >
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="todo">To Do</SelectItem>
-                                    <SelectItem value="in-progress">In Progress</SelectItem>
-                                    <SelectItem value="done">Done</SelectItem>
-                                </SelectContent>
-                            </Select>
-                        </div>
-                    </div>
-                    <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditOpen(false)}>
-                            Cancel
-                        </Button>
-                        <Button
-                            onClick={handleUpdateTask}
-                            disabled={saving}
-                            className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                        >
-                            {saving ? "Saving..." : "Save Changes"}
-                        </Button>
-                    </DialogFooter>
+                                {saving ? (
+                                    <span className="flex items-center gap-2">
+                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                        Saving...
+                                    </span>
+                                ) : (
+                                    "Save Changes"
+                                )}
+                            </Button>
+                        </DialogFooter>
+                    </form>
                 </DialogContent>
             </Dialog>
 
@@ -634,7 +806,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+                        <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={saving}>
                             Cancel
                         </Button>
                         <Button
@@ -642,7 +814,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             onClick={handleDeleteTask}
                             disabled={saving}
                         >
-                            {saving ? "Deleting..." : "Delete Task"}
+                            {saving ? (
+                                <span className="flex items-center gap-2">
+                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                    Deleting...
+                                </span>
+                            ) : (
+                                "Delete Task"
+                            )}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
@@ -657,36 +836,47 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             Update project details.
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="grid gap-4 py-4">
-                        <div className="space-y-2">
-                            <Label htmlFor="project-name">Project Name</Label>
-                            <Input
-                                id="project-name"
-                                value={editProjectName}
-                                onChange={(e) => setEditProjectName(e.target.value)}
-                            />
+                    <form onSubmit={(e) => { e.preventDefault(); handleUpdateProject(); }}>
+                        <div className="grid gap-4 py-4">
+                            <div className="space-y-2">
+                                <Label htmlFor="project-name">Project Name</Label>
+                                <Input
+                                    id="project-name"
+                                    value={editProjectName}
+                                    onChange={(e) => setEditProjectName(e.target.value)}
+                                    disabled={saving}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label htmlFor="project-desc">Description</Label>
+                                <Input
+                                    id="project-desc"
+                                    value={editProjectDesc}
+                                    onChange={(e) => setEditProjectDesc(e.target.value)}
+                                    disabled={saving}
+                                />
+                            </div>
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="project-desc">Description</Label>
-                            <Input
-                                id="project-desc"
-                                value={editProjectDesc}
-                                onChange={(e) => setEditProjectDesc(e.target.value)}
-                            />
-                        </div>
-                    </div>
-                    <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditProjectOpen(false)}>
-                            Cancel
-                        </Button>
-                        <Button
-                            onClick={handleUpdateProject}
-                            disabled={saving}
-                            className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                        >
-                            {saving ? "Saving..." : "Save Changes"}
-                        </Button>
-                    </DialogFooter>
+                        <DialogFooter>
+                            <Button type="button" variant="outline" onClick={() => setEditProjectOpen(false)} disabled={saving}>
+                                Cancel
+                            </Button>
+                            <Button
+                                type="submit"
+                                disabled={saving}
+                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
+                            >
+                                {saving ? (
+                                    <span className="flex items-center gap-2">
+                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                        Saving...
+                                    </span>
+                                ) : (
+                                    "Save Changes"
+                                )}
+                            </Button>
+                        </DialogFooter>
+                    </form>
                 </DialogContent>
             </Dialog>
         </div>
