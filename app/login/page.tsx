@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { useRouter } from "next/navigation"
 import { Label } from "@/components/ui/label"
 import { Eye, EyeOff, Globe, Users, Zap } from "lucide-react"
+import { useToast } from "@/components/ui/toast"
 
 export default function LoginPage() {
     const [email, setEmail] = useState("")
@@ -17,20 +18,37 @@ export default function LoginPage() {
     const [isSignUp, setIsSignUp] = useState(false)
     const [emailError, setEmailError] = useState("")
     const [passwordError, setPasswordError] = useState("")
+    const [checkingAuth, setCheckingAuth] = useState(true)
     const router = useRouter()
+    const { showSuccess, showError } = useToast()
+
+    // Prevent duplicate submissions
+    const isSubmittingRef = useRef(false)
 
     // Check if user is already logged in
     useEffect(() => {
+        let mounted = true
+
         const checkUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser()
-            if (user) {
-                router.push("/dashboard")
+            try {
+                const { data: { user } } = await supabase.auth.getUser()
+                if (mounted && user) {
+                    router.replace("/dashboard")
+                }
+            } catch (error) {
+                console.error("Auth check error:", error)
+            } finally {
+                if (mounted) {
+                    setCheckingAuth(false)
+                }
             }
         }
         checkUser()
+
+        return () => { mounted = false }
     }, [router])
 
-    const validateEmail = (email: string) => {
+    const validateEmail = useCallback((email: string) => {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
         if (!email) {
             setEmailError("Email is required")
@@ -42,9 +60,9 @@ export default function LoginPage() {
         }
         setEmailError("")
         return true
-    }
+    }, [])
 
-    const validatePassword = (password: string) => {
+    const validatePassword = useCallback((password: string) => {
         if (!password) {
             setPasswordError("Password is required")
             return false
@@ -55,65 +73,92 @@ export default function LoginPage() {
         }
         setPasswordError("")
         return true
-    }
+    }, [])
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault()
+
+        // Prevent duplicate submissions
+        if (isSubmittingRef.current || loading) return
 
         if (!validateEmail(email) || !validatePassword(password)) {
             return
         }
 
+        isSubmittingRef.current = true
         setLoading(true)
-        const { error } = await supabase.auth.signInWithPassword({
-            email,
-            password,
-        })
 
-        if (error) {
-            if (error.message.includes("Invalid login credentials")) {
-                setPasswordError("Invalid email or password")
+        try {
+            const { error } = await supabase.auth.signInWithPassword({
+                email,
+                password,
+            })
+
+            if (error) {
+                if (error.message.includes("Invalid login credentials")) {
+                    setPasswordError("Invalid email or password")
+                } else {
+                    showError(error.message)
+                }
             } else {
-                alert(`Login failed: ${error.message}`)
+                showSuccess("Welcome back!")
+                // Use replace to prevent back navigation to login
+                router.replace("/dashboard")
             }
-        } else {
-            router.push("/dashboard")
+        } catch (error) {
+            showError("An unexpected error occurred. Please try again.")
+            console.error("Login error:", error)
+        } finally {
+            setLoading(false)
+            isSubmittingRef.current = false
         }
-        setLoading(false)
     }
 
     const handleSignUp = async (e: React.FormEvent) => {
         e.preventDefault()
 
+        // Prevent duplicate submissions
+        if (isSubmittingRef.current || loading) return
+
         if (!validateEmail(email) || !validatePassword(password)) {
             return
         }
 
+        isSubmittingRef.current = true
         setLoading(true)
-        const { data, error } = await supabase.auth.signUp({
-            email,
-            password,
-            options: {
-                emailRedirectTo: `${window.location.origin}/dashboard`
-            }
-        })
 
-        if (error) {
-            if (error.message.includes("already registered")) {
-                setEmailError("This email is already registered. Please login instead.")
+        try {
+            const { data, error } = await supabase.auth.signUp({
+                email,
+                password,
+                options: {
+                    emailRedirectTo: `${window.location.origin}/dashboard`
+                }
+            })
+
+            if (error) {
+                if (error.message.includes("already registered")) {
+                    setEmailError("This email is already registered. Please login instead.")
+                } else {
+                    showError(error.message)
+                }
             } else {
-                alert(error.message)
+                // Check if email confirmation is required
+                if (data.user && !data.session) {
+                    showSuccess("Success! Please check your email to confirm your account.")
+                } else {
+                    // Auto-confirmed, redirect to dashboard
+                    showSuccess("Account created successfully!")
+                    router.replace("/dashboard")
+                }
             }
-        } else {
-            // Check if email confirmation is required
-            if (data.user && !data.session) {
-                alert("Success! Please check your email to confirm your account.")
-            } else {
-                // Auto-confirmed, redirect to dashboard
-                router.push("/dashboard")
-            }
+        } catch (error) {
+            showError("An unexpected error occurred. Please try again.")
+            console.error("SignUp error:", error)
+        } finally {
+            setLoading(false)
+            isSubmittingRef.current = false
         }
-        setLoading(false)
     }
 
     const features = [
@@ -121,6 +166,18 @@ export default function LoginPage() {
         { icon: Users, text: "Real-time team collaboration" },
         { icon: Zap, text: "Instant task updates" },
     ]
+
+    // Show loading while checking auth
+    if (checkingAuth) {
+        return (
+            <div className="min-h-screen flex items-center justify-center">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="w-10 h-10 border-3 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-gray-500">Loading...</span>
+                </div>
+            </div>
+        )
+    }
 
     return (
         <div className="min-h-screen flex">
@@ -202,6 +259,8 @@ export default function LoginPage() {
                                         }}
                                         className={emailError ? "border-red-500" : ""}
                                         required
+                                        disabled={loading}
+                                        autoComplete="email"
                                     />
                                     {emailError && (
                                         <p className="text-sm text-red-500">{emailError}</p>
@@ -221,11 +280,14 @@ export default function LoginPage() {
                                             }}
                                             className={passwordError ? "border-red-500 pr-10" : "pr-10"}
                                             required
+                                            disabled={loading}
+                                            autoComplete={isSignUp ? "new-password" : "current-password"}
                                         />
                                         <button
                                             type="button"
                                             onClick={() => setShowPassword(!showPassword)}
                                             className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                                            tabIndex={-1}
                                         >
                                             {showPassword ? (
                                                 <EyeOff className="w-4 h-4" />
