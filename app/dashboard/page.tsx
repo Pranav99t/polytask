@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card"
@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { useToast } from "@/components/ui/toast"
 
 interface Project {
     id: string
@@ -40,34 +41,55 @@ export default function DashboardPage() {
     const [saving, setSaving] = useState(false)
     const [activeMenu, setActiveMenu] = useState<string | null>(null)
     const router = useRouter()
+    const { showSuccess, showError, showLoading, hideToast } = useToast()
 
-    const fetchProjects = async () => {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) {
-            router.push("/login")
-            return
+    // Prevent duplicate operations
+    const operationLockRef = useRef(false)
+
+    const fetchProjects = useCallback(async (showLoadingState = true) => {
+        try {
+            if (showLoadingState) setLoading(true)
+
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                router.replace("/login")
+                return
+            }
+
+            const { data, error } = await supabase
+                .from("projects")
+                .select("*")
+                .eq("owner_id", user.id)
+                .order("created_at", { ascending: false })
+
+            if (error) {
+                console.error("Error fetching projects:", error)
+                showError("Failed to load projects")
+            } else {
+                setProjects(data || [])
+            }
+        } catch (error) {
+            console.error("Fetch error:", error)
+            showError("Failed to load projects")
+        } finally {
+            setLoading(false)
         }
-
-        const { data, error } = await supabase
-            .from("projects")
-            .select("*")
-            .eq("owner_id", user.id)
-            .order("created_at", { ascending: false })
-
-        if (error) {
-            console.error("Error fetching projects:", error)
-        } else {
-            setProjects(data || [])
-        }
-        setLoading(false)
-    }
+    }, [router, showError])
 
     useEffect(() => {
         fetchProjects()
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [])
+    }, [fetchProjects])
 
-    const validateProjectName = (name: string) => {
+    // Close menu when clicking outside
+    useEffect(() => {
+        const handleClickOutside = () => setActiveMenu(null)
+        if (activeMenu) {
+            document.addEventListener('click', handleClickOutside)
+            return () => document.removeEventListener('click', handleClickOutside)
+        }
+    }, [activeMenu])
+
+    const validateProjectName = useCallback((name: string) => {
         if (!name.trim()) {
             setNameError("Project name is required")
             return false
@@ -82,69 +104,131 @@ export default function DashboardPage() {
         }
         setNameError("")
         return true
-    }
+    }, [])
 
     const handleCreateProject = async () => {
+        if (operationLockRef.current || saving) return
         if (!validateProjectName(newProjectName)) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
+        const loadingToast = showLoading("Creating project...")
 
-        const { error } = await supabase.from("projects").insert({
-            name: newProjectName.trim(),
-            description: newProjectDesc.trim(),
-            owner_id: user.id,
-        })
+        try {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                hideToast(loadingToast)
+                router.replace("/login")
+                return
+            }
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setCreateOpen(false)
-            fetchProjects()
-            setNewProjectName("")
-            setNewProjectDesc("")
+            const { data, error } = await supabase
+                .from("projects")
+                .insert({
+                    name: newProjectName.trim(),
+                    description: newProjectDesc.trim(),
+                    owner_id: user.id,
+                })
+                .select()
+                .single()
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                // Optimistic update - add to list immediately
+                setProjects(prev => [data, ...prev])
+                setCreateOpen(false)
+                setNewProjectName("")
+                setNewProjectDesc("")
+                setNameError("")
+                showSuccess("Project created successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Create error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleUpdateProject = async () => {
+        if (operationLockRef.current || saving) return
         if (!selectedProject || !validateProjectName(editName)) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("projects")
-            .update({
-                name: editName.trim(),
-                description: editDesc.trim(),
-            })
-            .eq("id", selectedProject.id)
+        const loadingToast = showLoading("Updating project...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setEditOpen(false)
-            fetchProjects()
+        try {
+            const { data, error } = await supabase
+                .from("projects")
+                .update({
+                    name: editName.trim(),
+                    description: editDesc.trim(),
+                })
+                .eq("id", selectedProject.id)
+                .select()
+                .single()
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                // Optimistic update - update in list immediately
+                setProjects(prev => prev.map(p =>
+                    p.id === selectedProject.id ? data : p
+                ))
+                setEditOpen(false)
+                setNameError("")
+                showSuccess("Project updated successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Update error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleDeleteProject = async () => {
+        if (operationLockRef.current || saving) return
         if (!selectedProject) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("projects")
-            .delete()
-            .eq("id", selectedProject.id)
+        const loadingToast = showLoading("Deleting project...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setDeleteOpen(false)
-            fetchProjects()
+        try {
+            const { error } = await supabase
+                .from("projects")
+                .delete()
+                .eq("id", selectedProject.id)
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                // Optimistic update - remove from list immediately
+                setProjects(prev => prev.filter(p => p.id !== selectedProject.id))
+                setDeleteOpen(false)
+                showSuccess("Project deleted successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Delete error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const openEditDialog = (project: Project, e: React.MouseEvent) => {
@@ -152,6 +236,7 @@ export default function DashboardPage() {
         setSelectedProject(project)
         setEditName(project.name)
         setEditDesc(project.description || "")
+        setNameError("")
         setEditOpen(true)
         setActiveMenu(null)
     }
@@ -171,6 +256,23 @@ export default function DashboardPage() {
         })
     }
 
+    // Reset dialog state on close
+    const handleCreateOpenChange = (open: boolean) => {
+        setCreateOpen(open)
+        if (!open) {
+            setNewProjectName("")
+            setNewProjectDesc("")
+            setNameError("")
+        }
+    }
+
+    const handleEditOpenChange = (open: boolean) => {
+        setEditOpen(open)
+        if (!open) {
+            setNameError("")
+        }
+    }
+
     return (
         <div className="p-8 max-w-7xl mx-auto">
             {/* Header */}
@@ -180,7 +282,7 @@ export default function DashboardPage() {
                     <p className="text-gray-500 mt-1">Manage your collaborative task boards</p>
                 </div>
 
-                <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+                <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
                     <DialogTrigger asChild>
                         <Button className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 shadow-lg shadow-violet-200 hover:shadow-violet-300 transition-all">
                             <Plus className="mr-2 h-4 w-4" /> New Project
@@ -193,49 +295,66 @@ export default function DashboardPage() {
                                 Create a new collaborative project board for your team.
                             </DialogDescription>
                         </DialogHeader>
-                        <div className="grid gap-4 py-4">
-                            <div className="space-y-2">
-                                <Label htmlFor="create-name">
-                                    Project Name <span className="text-red-500">*</span>
-                                </Label>
-                                <Input
-                                    id="create-name"
-                                    value={newProjectName}
-                                    onChange={(e) => {
-                                        setNewProjectName(e.target.value)
-                                        if (nameError) validateProjectName(e.target.value)
-                                    }}
-                                    placeholder="e.g., Marketing Campaign Q1"
-                                    className={nameError ? "border-red-500" : ""}
-                                />
-                                {nameError && (
-                                    <p className="text-sm text-red-500">{nameError}</p>
-                                )}
+                        <form onSubmit={(e) => { e.preventDefault(); handleCreateProject(); }}>
+                            <div className="grid gap-4 py-4">
+                                <div className="space-y-2">
+                                    <Label htmlFor="create-name">
+                                        Project Name <span className="text-red-500">*</span>
+                                    </Label>
+                                    <Input
+                                        id="create-name"
+                                        value={newProjectName}
+                                        onChange={(e) => {
+                                            setNewProjectName(e.target.value)
+                                            if (nameError) validateProjectName(e.target.value)
+                                        }}
+                                        placeholder="e.g., Marketing Campaign Q1"
+                                        className={nameError ? "border-red-500" : ""}
+                                        disabled={saving}
+                                        autoFocus
+                                    />
+                                    {nameError && (
+                                        <p className="text-sm text-red-500">{nameError}</p>
+                                    )}
+                                </div>
+                                <div className="space-y-2">
+                                    <Label htmlFor="create-description">
+                                        Description <span className="text-gray-400 text-sm">(optional)</span>
+                                    </Label>
+                                    <Input
+                                        id="create-description"
+                                        value={newProjectDesc}
+                                        onChange={(e) => setNewProjectDesc(e.target.value)}
+                                        placeholder="Brief description of the project"
+                                        disabled={saving}
+                                    />
+                                </div>
                             </div>
-                            <div className="space-y-2">
-                                <Label htmlFor="create-description">
-                                    Description <span className="text-gray-400 text-sm">(optional)</span>
-                                </Label>
-                                <Input
-                                    id="create-description"
-                                    value={newProjectDesc}
-                                    onChange={(e) => setNewProjectDesc(e.target.value)}
-                                    placeholder="Brief description of the project"
-                                />
-                            </div>
-                        </div>
-                        <DialogFooter>
-                            <Button variant="outline" onClick={() => setCreateOpen(false)}>
-                                Cancel
-                            </Button>
-                            <Button
-                                onClick={handleCreateProject}
-                                disabled={saving}
-                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                            >
-                                {saving ? "Creating..." : "Create Project"}
-                            </Button>
-                        </DialogFooter>
+                            <DialogFooter>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => setCreateOpen(false)}
+                                    disabled={saving}
+                                >
+                                    Cancel
+                                </Button>
+                                <Button
+                                    type="submit"
+                                    disabled={saving}
+                                    className="bg-gradient-to-r from-violet-600 to-indigo-600"
+                                >
+                                    {saving ? (
+                                        <span className="flex items-center gap-2">
+                                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                            Creating...
+                                        </span>
+                                    ) : (
+                                        "Create Project"
+                                    )}
+                                </Button>
+                            </DialogFooter>
+                        </form>
                     </DialogContent>
                 </Dialog>
             </div>
@@ -330,7 +449,7 @@ export default function DashboardPage() {
             )}
 
             {/* Edit Dialog */}
-            <Dialog open={editOpen} onOpenChange={setEditOpen}>
+            <Dialog open={editOpen} onOpenChange={handleEditOpenChange}>
                 <DialogContent className="sm:max-w-[425px]">
                     <DialogHeader>
                         <DialogTitle>Edit Project</DialogTitle>
@@ -338,45 +457,61 @@ export default function DashboardPage() {
                             Update your project details.
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="grid gap-4 py-4">
-                        <div className="space-y-2">
-                            <Label htmlFor="edit-name">
-                                Project Name <span className="text-red-500">*</span>
-                            </Label>
-                            <Input
-                                id="edit-name"
-                                value={editName}
-                                onChange={(e) => {
-                                    setEditName(e.target.value)
-                                    if (nameError) validateProjectName(e.target.value)
-                                }}
-                                className={nameError ? "border-red-500" : ""}
-                            />
-                            {nameError && (
-                                <p className="text-sm text-red-500">{nameError}</p>
-                            )}
+                    <form onSubmit={(e) => { e.preventDefault(); handleUpdateProject(); }}>
+                        <div className="grid gap-4 py-4">
+                            <div className="space-y-2">
+                                <Label htmlFor="edit-name">
+                                    Project Name <span className="text-red-500">*</span>
+                                </Label>
+                                <Input
+                                    id="edit-name"
+                                    value={editName}
+                                    onChange={(e) => {
+                                        setEditName(e.target.value)
+                                        if (nameError) validateProjectName(e.target.value)
+                                    }}
+                                    className={nameError ? "border-red-500" : ""}
+                                    disabled={saving}
+                                />
+                                {nameError && (
+                                    <p className="text-sm text-red-500">{nameError}</p>
+                                )}
+                            </div>
+                            <div className="space-y-2">
+                                <Label htmlFor="edit-description">Description</Label>
+                                <Input
+                                    id="edit-description"
+                                    value={editDesc}
+                                    onChange={(e) => setEditDesc(e.target.value)}
+                                    disabled={saving}
+                                />
+                            </div>
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="edit-description">Description</Label>
-                            <Input
-                                id="edit-description"
-                                value={editDesc}
-                                onChange={(e) => setEditDesc(e.target.value)}
-                            />
-                        </div>
-                    </div>
-                    <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditOpen(false)}>
-                            Cancel
-                        </Button>
-                        <Button
-                            onClick={handleUpdateProject}
-                            disabled={saving}
-                            className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                        >
-                            {saving ? "Saving..." : "Save Changes"}
-                        </Button>
-                    </DialogFooter>
+                        <DialogFooter>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => setEditOpen(false)}
+                                disabled={saving}
+                            >
+                                Cancel
+                            </Button>
+                            <Button
+                                type="submit"
+                                disabled={saving}
+                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
+                            >
+                                {saving ? (
+                                    <span className="flex items-center gap-2">
+                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                        Saving...
+                                    </span>
+                                ) : (
+                                    "Save Changes"
+                                )}
+                            </Button>
+                        </DialogFooter>
+                    </form>
                 </DialogContent>
             </Dialog>
 
@@ -391,7 +526,11 @@ export default function DashboardPage() {
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+                        <Button
+                            variant="outline"
+                            onClick={() => setDeleteOpen(false)}
+                            disabled={saving}
+                        >
                             Cancel
                         </Button>
                         <Button
@@ -399,7 +538,14 @@ export default function DashboardPage() {
                             onClick={handleDeleteProject}
                             disabled={saving}
                         >
-                            {saving ? "Deleting..." : "Delete Project"}
+                            {saving ? (
+                                <span className="flex items-center gap-2">
+                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                    Deleting...
+                                </span>
+                            ) : (
+                                "Delete Project"
+                            )}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
