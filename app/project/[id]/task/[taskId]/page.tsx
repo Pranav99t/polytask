@@ -3,11 +3,10 @@
 import { useEffect, useState, use, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { useRouter } from "next/navigation"
-import { CommentSection } from "@/components/shared/CommentSection"
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
 import {
     Select,
     SelectContent,
@@ -25,16 +24,16 @@ import {
 } from "@/components/ui/dialog"
 import {
     ArrowLeft,
-    Pencil,
-    Trash2,
     CheckCircle2,
     Clock,
     Circle,
+    Pencil,
+    Trash2,
     MessageSquare,
-    Calendar
+    User
 } from "lucide-react"
-import { useTranslation } from "react-i18next"
 import { useToast } from "@/components/ui/toast"
+import { CommentSection } from "@/components/shared/CommentSection"
 
 interface Task {
     id: string
@@ -42,12 +41,25 @@ interface Task {
     description: string
     status: 'todo' | 'in-progress' | 'done'
     project_id: string
+    assigned_to: string | null
+    created_by: string
     created_at: string
 }
 
 interface Project {
     id: string
     name: string
+    organisation_id: string
+}
+
+interface TeamMember {
+    user_id: string
+    role: string
+    users: {
+        id: string
+        email: string
+        full_name: string
+    }
 }
 
 const STATUS_CONFIG = {
@@ -56,54 +68,60 @@ const STATUS_CONFIG = {
         icon: Circle,
         color: 'text-gray-600',
         bg: 'bg-gray-100',
-        border: 'border-gray-300'
+        border: 'border-gray-200'
     },
     'in-progress': {
         label: 'In Progress',
         icon: Clock,
         color: 'text-amber-600',
-        bg: 'bg-amber-50',
-        border: 'border-amber-300'
+        bg: 'bg-amber-100',
+        border: 'border-amber-200'
     },
     'done': {
         label: 'Done',
         icon: CheckCircle2,
         color: 'text-emerald-600',
-        bg: 'bg-emerald-50',
-        border: 'border-emerald-300'
+        bg: 'bg-emerald-100',
+        border: 'border-emerald-200'
     },
 }
 
-export default function TaskView({ params }: { params: Promise<{ id: string, taskId: string }> }) {
+export default function TaskPage({ params }: { params: Promise<{ id: string; taskId: string }> }) {
     const resolvedParams = use(params)
     const [task, setTask] = useState<Task | null>(null)
     const [project, setProject] = useState<Project | null>(null)
+    const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
     const [loading, setLoading] = useState(true)
+    const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+    const [userRole, setUserRole] = useState<'leader' | 'admin' | 'member'>('member')
 
-    // Edit state
+    // Edit task
     const [editOpen, setEditOpen] = useState(false)
     const [editTitle, setEditTitle] = useState("")
     const [editDesc, setEditDesc] = useState("")
     const [editStatus, setEditStatus] = useState<'todo' | 'in-progress' | 'done'>('todo')
+    const [editAssignee, setEditAssignee] = useState<string>("unassigned")
 
-    // Delete state
+    // Delete task
     const [deleteOpen, setDeleteOpen] = useState(false)
+
     const [saving, setSaving] = useState(false)
+    const [titleError, setTitleError] = useState("")
 
     const router = useRouter()
-    const { t } = useTranslation()
     const { showSuccess, showError, showLoading, hideToast } = useToast()
-
-    // Prevent duplicate operations
     const operationLockRef = useRef(false)
 
-    const fetchTask = useCallback(async () => {
+    const fetchData = useCallback(async (showLoadingState = true) => {
         try {
+            if (showLoadingState) setLoading(true)
+
             const { data: { user } } = await supabase.auth.getUser()
             if (!user) {
                 router.replace("/login")
                 return
             }
+            setCurrentUserId(user.id)
 
             // Fetch task and project in parallel
             const [taskResult, projectResult] = await Promise.all([
@@ -114,7 +132,7 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                     .single(),
                 supabase
                     .from("projects")
-                    .select("id, name")
+                    .select("id, name, organisation_id")
                     .eq("id", resolvedParams.id)
                     .single()
             ])
@@ -124,9 +142,34 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                 setLoading(false)
                 return
             }
+            if (projectResult.error || !projectResult.data) {
+                console.error("Error fetching project:", projectResult.error)
+                setLoading(false)
+                return
+            }
 
             setTask(taskResult.data)
             setProject(projectResult.data)
+
+            // Fetch team members
+            const { data: members } = await supabase
+                .from("organisation_members")
+                .select(`
+                    user_id,
+                    role,
+                    users (id, email, full_name)
+                `)
+                .eq("organisation_id", projectResult.data.organisation_id)
+
+            if (members) {
+                const teamMembers = members as unknown as TeamMember[]
+                setTeamMembers(teamMembers)
+                // Find current user's role
+                const currentMember = teamMembers.find(m => m.user_id === user.id)
+                if (currentMember) {
+                    setUserRole(currentMember.role as 'leader' | 'admin' | 'member')
+                }
+            }
         } catch (error) {
             console.error("Fetch error:", error)
             showError("Failed to load task")
@@ -136,20 +179,19 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
     }, [resolvedParams.taskId, resolvedParams.id, router, showError])
 
     useEffect(() => {
-        fetchTask()
+        fetchData()
 
-        // Subscribe to task changes
+        // Subscribe to task updates
         const channel = supabase
             .channel(`task-${resolvedParams.taskId}`)
             .on(
                 'postgres_changes',
                 { event: '*', schema: 'public', table: 'tasks', filter: `id=eq.${resolvedParams.taskId}` },
                 (payload) => {
-                    if (payload.eventType === 'DELETE') {
-                        router.push(`/project/${resolvedParams.id}`)
-                    } else if (payload.eventType === 'UPDATE') {
-                        // Update task directly from payload
+                    if (payload.eventType === 'UPDATE') {
                         setTask(payload.new as Task)
+                    } else if (payload.eventType === 'DELETE') {
+                        router.push(`/project/${resolvedParams.id}`)
                     }
                 }
             )
@@ -158,11 +200,54 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
         return () => {
             supabase.removeChannel(channel)
         }
-    }, [resolvedParams.taskId, resolvedParams.id, fetchTask, router])
+    }, [resolvedParams.taskId, resolvedParams.id, fetchData, router])
+
+    const getMemberName = (userId: string | null) => {
+        if (!userId) return 'Unassigned'
+        const member = teamMembers.find(m => m.user_id === userId)
+        return member?.users?.full_name || member?.users?.email || 'Unknown'
+    }
+
+    const validateTitle = useCallback((title: string) => {
+        if (!title.trim()) {
+            setTitleError("Task title is required")
+            return false
+        }
+        if (title.trim().length < 2) {
+            setTitleError("Title must be at least 2 characters")
+            return false
+        }
+        setTitleError("")
+        return true
+    }, [])
+
+    const handleQuickStatusChange = async (newStatus: 'todo' | 'in-progress' | 'done') => {
+        if (operationLockRef.current || !task) return
+
+        const oldStatus = task.status
+        setTask(prev => prev ? { ...prev, status: newStatus } : null)
+
+        try {
+            const { error } = await supabase
+                .from("tasks")
+                .update({ status: newStatus })
+                .eq("id", task.id)
+
+            if (error) {
+                setTask(prev => prev ? { ...prev, status: oldStatus } : null)
+                showError(error.message)
+            } else {
+                showSuccess(`Status updated to ${STATUS_CONFIG[newStatus].label}`)
+            }
+        } catch (error) {
+            setTask(prev => prev ? { ...prev, status: oldStatus } : null)
+            showError("Failed to update status")
+        }
+    }
 
     const handleUpdateTask = async () => {
         if (operationLockRef.current || saving) return
-        if (!task || !editTitle.trim()) return
+        if (!task || !validateTitle(editTitle)) return
 
         operationLockRef.current = true
         setSaving(true)
@@ -175,6 +260,7 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                     title: editTitle.trim(),
                     description: editDesc.trim(),
                     status: editStatus,
+                    assigned_to: editAssignee === 'unassigned' ? null : editAssignee
                 })
                 .eq("id", task.id)
                 .select()
@@ -187,6 +273,7 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
             } else {
                 setTask(data)
                 setEditOpen(false)
+                setTitleError("")
                 showSuccess("Task updated successfully!")
             }
         } catch (error) {
@@ -231,50 +318,21 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
         }
     }
 
-    const handleQuickStatusChange = async (newStatus: 'todo' | 'in-progress' | 'done') => {
-        if (operationLockRef.current || !task) return
-
-        const previousStatus = task.status
-
-        // Optimistic update
-        setTask(prev => prev ? { ...prev, status: newStatus } : prev)
-
-        try {
-            const { error } = await supabase
-                .from("tasks")
-                .update({ status: newStatus })
-                .eq("id", task.id)
-
-            if (error) {
-                // Rollback on error
-                setTask(prev => prev ? { ...prev, status: previousStatus } : prev)
-                showError(error.message)
-            }
-        } catch (error) {
-            // Rollback on error
-            setTask(prev => prev ? { ...prev, status: previousStatus } : prev)
-            showError("Failed to update status")
-            console.error("Status update error:", error)
-        }
-    }
-
-    const formatDate = (dateString: string) => {
-        return new Date(dateString).toLocaleDateString('en-US', {
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        })
+    const openEditDialog = () => {
+        if (!task) return
+        setEditTitle(task.title)
+        setEditDesc(task.description || "")
+        setEditStatus(task.status)
+        setEditAssignee(task.assigned_to || "unassigned")
+        setTitleError("")
+        setEditOpen(true)
     }
 
     if (loading) {
         return (
             <div className="p-8 max-w-4xl mx-auto">
                 <div className="animate-pulse space-y-6">
-                    <div className="h-6 bg-gray-200 rounded w-1/4" />
-                    <div className="h-10 bg-gray-200 rounded w-2/3" />
+                    <div className="h-8 bg-gray-200 rounded w-1/3" />
                     <div className="h-40 bg-gray-100 rounded-xl" />
                     <div className="h-64 bg-gray-100 rounded-xl" />
                 </div>
@@ -282,11 +340,11 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
         )
     }
 
-    if (!task) {
+    if (!task || !project) {
         return (
             <div className="p-8 text-center">
                 <h1 className="text-2xl font-bold text-gray-900">Task not found</h1>
-                <p className="text-gray-500 mt-2">This task may have been deleted.</p>
+                <p className="text-gray-500 mt-2">This task may have been deleted or you don&apos;t have access.</p>
                 <Button className="mt-4" onClick={() => router.push(`/project/${resolvedParams.id}`)}>
                     Back to Project
                 </Button>
@@ -295,144 +353,175 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
     }
 
     const statusConfig = STATUS_CONFIG[task.status]
+    const StatusIcon = statusConfig.icon
+
+    // Permission checks
+    const canManageProject = userRole === 'leader' || userRole === 'admin'
+    const isAssignedToTask = currentUserId === task.assigned_to
+    const canEditTask = canManageProject || isAssignedToTask
+    const canDeleteTask = canManageProject
 
     return (
-        <div className="p-8 max-w-4xl mx-auto space-y-6">
-            {/* Breadcrumb */}
-            <div className="flex items-center gap-2 text-sm">
-                <button
-                    onClick={() => router.push('/dashboard')}
-                    className="text-gray-500 hover:text-gray-700"
-                >
-                    Dashboard
-                </button>
-                <span className="text-gray-400">/</span>
-                <button
-                    onClick={() => router.push(`/project/${resolvedParams.id}`)}
-                    className="text-gray-500 hover:text-gray-700"
-                >
-                    {project?.name || 'Project'}
-                </button>
-                <span className="text-gray-400">/</span>
-                <span className="text-gray-900 font-medium">Task</span>
-            </div>
-
-            {/* Back button and actions */}
-            <div className="flex items-center justify-between">
+        <div className="p-8 max-w-4xl mx-auto space-y-8">
+            {/* Header */}
+            <div className="flex items-start gap-4">
                 <Button
                     variant="ghost"
+                    size="icon"
                     onClick={() => router.push(`/project/${resolvedParams.id}`)}
-                    className="gap-2"
+                    className="rounded-full shrink-0 mt-1"
                 >
-                    <ArrowLeft className="w-4 h-4" />
-                    Back to Project
+                    <ArrowLeft className="w-5 h-5" />
                 </Button>
-
-                <div className="flex gap-2">
-                    <Button
-                        variant="outline"
-                        onClick={() => {
-                            setEditTitle(task.title)
-                            setEditDesc(task.description || "")
-                            setEditStatus(task.status)
-                            setEditOpen(true)
-                        }}
-                        className="gap-2"
-                    >
-                        <Pencil className="w-4 h-4" />
-                        Edit
-                    </Button>
-                    <Button
-                        variant="outline"
-                        onClick={() => setDeleteOpen(true)}
-                        className="gap-2 text-red-600 hover:text-red-700 hover:bg-red-50"
-                    >
-                        <Trash2 className="w-4 h-4" />
-                        Delete
-                    </Button>
+                <div className="flex-1">
+                    <p className="text-sm text-gray-500 mb-1">{project.name}</p>
+                    <div className="flex items-start justify-between gap-4">
+                        <h1 className={`text-2xl font-bold text-gray-900 ${task.status === 'done' ? 'line-through text-gray-500' : ''}`}>
+                            {task.title}
+                        </h1>
+                        <div className="flex items-center gap-2 shrink-0">
+                            {canEditTask && (
+                                <Button variant="outline" size="sm" onClick={openEditDialog}>
+                                    <Pencil className="w-4 h-4 mr-2" />
+                                    Edit
+                                </Button>
+                            )}
+                            {canDeleteTask && (
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="text-red-600 hover:bg-red-50"
+                                    onClick={() => setDeleteOpen(true)}
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </Button>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            {/* Task Details Card */}
-            <Card className="border-0 shadow-lg">
-                <CardHeader>
-                    <div className="flex items-start justify-between gap-4">
-                        <div className="space-y-2">
-                            <CardTitle className={`text-2xl ${task.status === 'done' ? 'line-through text-gray-500' : ''}`}>
-                                {task.title}
-                            </CardTitle>
-                            <div className="flex items-center gap-4 text-sm text-gray-500">
-                                <div className="flex items-center gap-1">
-                                    <Calendar className="w-4 h-4" />
-                                    {formatDate(task.created_at)}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                    {/* Status Badge with Quick Actions */}
-                    <div className="space-y-3">
-                        <Label className="text-gray-500 text-sm">Status</Label>
-                        <div className="flex flex-wrap gap-2">
-                            {(['todo', 'in-progress', 'done'] as const).map(status => {
-                                const config = STATUS_CONFIG[status]
-                                const Icon = config.icon
-                                const isActive = task.status === status
-
-                                return (
-                                    <button
-                                        key={status}
-                                        onClick={() => handleQuickStatusChange(status)}
-                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg border-2 transition-all ${isActive
-                                            ? `${config.bg} ${config.border} ${config.color}`
-                                            : 'border-gray-200 text-gray-500 hover:border-gray-300'
-                                            }`}
-                                    >
-                                        <Icon className="w-4 h-4" />
-                                        <span className="font-medium">{config.label}</span>
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
-
+            {/* Task Details */}
+            <div className="grid md:grid-cols-3 gap-6">
+                {/* Main Content */}
+                <div className="md:col-span-2 space-y-6">
                     {/* Description */}
-                    <div className="space-y-2">
-                        <Label className="text-gray-500 text-sm">Description</Label>
-                        <div className="p-4 rounded-lg bg-gray-50 min-h-[80px]">
-                            <p className="text-gray-700 whitespace-pre-wrap">
-                                {task.description || "No description provided."}
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-lg">Description</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                            <p className="text-gray-600">
+                                {task.description || "No description provided"}
                             </p>
-                        </div>
-                    </div>
-                </CardContent>
-            </Card>
+                        </CardContent>
+                    </Card>
 
-            {/* Comments Section */}
-            <Card className="border-0 shadow-lg">
-                <CardHeader>
-                    <div className="flex items-center gap-2">
-                        <MessageSquare className="w-5 h-5 text-violet-500" />
-                        <CardTitle className="text-lg">{t('comments')}</CardTitle>
-                    </div>
-                    <CardDescription>
-                        Collaborate with your team. Comments are automatically translated to each user's preferred language.
-                    </CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <CommentSection taskId={task.id} />
-                </CardContent>
-            </Card>
+                    {/* Comments */}
+                    <Card>
+                        <CardHeader>
+                            <div className="flex items-center gap-2">
+                                <MessageSquare className="w-5 h-5 text-violet-500" />
+                                <CardTitle className="text-lg">Comments</CardTitle>
+                            </div>
+                            <CardDescription>
+                                Collaborate with your team. Comments are automatically translated to each user&apos;s preferred language.
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                            <CommentSection taskId={task.id} />
+                        </CardContent>
+                    </Card>
+                </div>
+
+                {/* Sidebar */}
+                <div className="space-y-6">
+                    {/* Status */}
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-sm text-gray-500 font-medium">Status</CardTitle>
+                        </CardHeader>
+                        <CardContent className="pt-0">
+                            <div className="flex flex-col gap-2">
+                                {(['todo', 'in-progress', 'done'] as const).map(status => {
+                                    const config = STATUS_CONFIG[status]
+                                    const Icon = config.icon
+                                    const isActive = task.status === status
+
+                                    return (
+                                        <button
+                                            key={status}
+                                            onClick={() => handleQuickStatusChange(status)}
+                                            className={`flex items-center gap-3 p-3 rounded-lg border-2 transition-all ${isActive
+                                                ? `${config.bg} ${config.border}`
+                                                : 'border-transparent hover:border-gray-200 hover:bg-gray-50'
+                                                }`}
+                                        >
+                                            <Icon className={`w-5 h-5 ${isActive ? config.color : 'text-gray-400'}`} />
+                                            <span className={`font-medium ${isActive ? config.color : 'text-gray-600'}`}>
+                                                {config.label}
+                                            </span>
+                                            {isActive && (
+                                                <CheckCircle2 className={`w-4 h-4 ml-auto ${config.color}`} />
+                                            )}
+                                        </button>
+                                    )
+                                })}
+                            </div>
+                        </CardContent>
+                    </Card>
+
+                    {/* Assignee */}
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-sm text-gray-500 font-medium">Assigned To</CardTitle>
+                        </CardHeader>
+                        <CardContent className="pt-0">
+                            {task.assigned_to ? (
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500 flex items-center justify-center text-white font-medium">
+                                        {getMemberName(task.assigned_to).charAt(0).toUpperCase()}
+                                    </div>
+                                    <div>
+                                        <p className="font-medium text-gray-900">{getMemberName(task.assigned_to)}</p>
+                                        <p className="text-sm text-gray-500">Team Member</p>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex items-center gap-3 text-gray-400">
+                                    <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
+                                        <User className="w-5 h-5" />
+                                    </div>
+                                    <span>Unassigned</span>
+                                </div>
+                            )}
+                        </CardContent>
+                    </Card>
+
+                    {/* Created */}
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-sm text-gray-500 font-medium">Created</CardTitle>
+                        </CardHeader>
+                        <CardContent className="pt-0">
+                            <p className="text-gray-600">
+                                {new Date(task.created_at).toLocaleDateString('en-US', {
+                                    weekday: 'long',
+                                    year: 'numeric',
+                                    month: 'long',
+                                    day: 'numeric'
+                                })}
+                            </p>
+                        </CardContent>
+                    </Card>
+                </div>
+            </div>
 
             {/* Edit Task Dialog */}
             <Dialog open={editOpen} onOpenChange={setEditOpen}>
                 <DialogContent className="sm:max-w-[500px]">
                     <DialogHeader>
                         <DialogTitle>Edit Task</DialogTitle>
-                        <DialogDescription>
-                            Update task details.
-                        </DialogDescription>
                     </DialogHeader>
                     <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(); }}>
                         <div className="grid gap-4 py-4">
@@ -441,56 +530,58 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                                 <Input
                                     id="edit-title"
                                     value={editTitle}
-                                    onChange={(e) => setEditTitle(e.target.value)}
+                                    onChange={(e) => {
+                                        setEditTitle(e.target.value)
+                                        if (titleError) validateTitle(e.target.value)
+                                    }}
+                                    className={titleError ? "border-red-500" : ""}
                                     disabled={saving}
                                 />
+                                {titleError && <p className="text-sm text-red-500">{titleError}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="edit-desc">Description</Label>
-                                <textarea
+                                <Input
                                     id="edit-desc"
                                     value={editDesc}
                                     onChange={(e) => setEditDesc(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-200 rounded-md min-h-[100px] focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                    placeholder="Add more details..."
                                     disabled={saving}
                                 />
                             </div>
-                            <div className="space-y-2">
-                                <Label>Status</Label>
-                                <Select
-                                    value={editStatus}
-                                    onValueChange={(v) => setEditStatus(v as typeof editStatus)}
-                                    disabled={saving}
-                                >
-                                    <SelectTrigger>
-                                        <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        <SelectItem value="todo">To Do</SelectItem>
-                                        <SelectItem value="in-progress">In Progress</SelectItem>
-                                        <SelectItem value="done">Done</SelectItem>
-                                    </SelectContent>
-                                </Select>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <Label>Status</Label>
+                                    <Select value={editStatus} onValueChange={(v) => setEditStatus(v as typeof editStatus)} disabled={saving}>
+                                        <SelectTrigger><SelectValue /></SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="todo">To Do</SelectItem>
+                                            <SelectItem value="in-progress">In Progress</SelectItem>
+                                            <SelectItem value="done">Done</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>Assign To</Label>
+                                    <Select value={editAssignee} onValueChange={setEditAssignee} disabled={saving}>
+                                        <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="unassigned">Unassigned</SelectItem>
+                                            {teamMembers.map(member => (
+                                                <SelectItem key={member.user_id} value={member.user_id}>
+                                                    {member.users?.full_name || member.users?.email}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
                             </div>
                         </div>
                         <DialogFooter>
                             <Button type="button" variant="outline" onClick={() => setEditOpen(false)} disabled={saving}>
                                 Cancel
                             </Button>
-                            <Button
-                                type="submit"
-                                disabled={saving || !editTitle.trim()}
-                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                            >
-                                {saving ? (
-                                    <span className="flex items-center gap-2">
-                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                        Saving...
-                                    </span>
-                                ) : (
-                                    "Save Changes"
-                                )}
+                            <Button type="submit" disabled={saving} className="bg-gradient-to-r from-violet-600 to-indigo-600">
+                                {saving ? "Saving..." : "Save Changes"}
                             </Button>
                         </DialogFooter>
                     </form>
@@ -503,27 +594,15 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                     <DialogHeader>
                         <DialogTitle className="text-red-600">Delete Task</DialogTitle>
                         <DialogDescription>
-                            Are you sure you want to delete <strong>{task.title}</strong>?
-                            This will also delete all comments. This action cannot be undone.
+                            Are you sure you want to delete <strong>{task.title}</strong>? This action cannot be undone.
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
                         <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={saving}>
                             Cancel
                         </Button>
-                        <Button
-                            variant="destructive"
-                            onClick={handleDeleteTask}
-                            disabled={saving}
-                        >
-                            {saving ? (
-                                <span className="flex items-center gap-2">
-                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                    Deleting...
-                                </span>
-                            ) : (
-                                "Delete Task"
-                            )}
+                        <Button variant="destructive" onClick={handleDeleteTask} disabled={saving}>
+                            {saving ? "Deleting..." : "Delete Task"}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
