@@ -2,9 +2,16 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
 // Create a Supabase client with service role for server operations
+// IMPORTANT: Service role key bypasses RLS, only use for trusted server operations
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-const supabase = createClient(supabaseUrl, supabaseServiceKey)
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+
+// Check if service key is available
+if (!supabaseServiceKey) {
+    console.warn('⚠️  SUPABASE_SERVICE_ROLE_KEY is not set! Comments API will not work properly.')
+}
+
+const supabase = createClient(supabaseUrl, supabaseServiceKey || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)
 
 // Lingo.dev API configuration
 const LINGO_API_URL = 'https://api.lingo.dev/v1/translate'
