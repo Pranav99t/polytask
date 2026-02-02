@@ -4,8 +4,8 @@ import { useEffect, useState, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent } from "@/components/ui/card"
 import { useTranslation } from "react-i18next"
+import { Send, User, Globe } from "lucide-react"
 
 const MAX_COMMENT_LENGTH = 500
 
@@ -14,44 +14,36 @@ interface Comment {
     content: string
     created_at: string
     author_id: string
+    author_email?: string
+}
+
+interface UserProfile {
+    id: string
+    email: string
 }
 
 export function CommentSection({ taskId }: { taskId: string }) {
     const [comments, setComments] = useState<Comment[]>([])
+    const [users, setUsers] = useState<Record<string, UserProfile>>({})
     const [newComment, setNewComment] = useState("")
     const [loading, setLoading] = useState(false)
+    const [fetchingComments, setFetchingComments] = useState(true)
     const { i18n, t } = useTranslation()
     const messagesEndRef = useRef<null | HTMLDivElement>(null)
+    const [currentUserId, setCurrentUserId] = useState<string | null>(null)
 
     useEffect(() => {
-        fetchComments()
-
-        const channel = supabase
-            .channel(`comments:${taskId}`)
-            .on(
-                'postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'comments', filter: `task_id=eq.${taskId}` },
-                (payload) => {
-                    // When a new comment arrives, we might want to fetch its translation immediately
-                    // or just display the original if translation isn't ready.
-                    // Ideally, we listen to *translation* table for this specific comment?
-                    // For simplicity, we'll append the raw comment and let a separate effect/subscription update it
-                    fetchComments()
-                }
-            )
-            .subscribe()
-
-        return () => {
-            supabase.removeChannel(channel)
+        const getCurrentUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (user) {
+                setCurrentUserId(user.id)
+            }
         }
-    }, [taskId, i18n.language]) // Re-fetch if language changes
+        getCurrentUser()
+    }, [])
 
     const fetchComments = async () => {
-        const { data: { user } } = await supabase.auth.getUser()
-
-        // Complex query to get comments AND their translations for current locale
-        // Supabase JS doesn't support easy "join and pick valid translation" in one go for list?
-        // We'll simplisticly fetch comments, then fetch translations.
+        setFetchingComments(true)
 
         const { data: commentsData, error } = await supabase
             .from("comments")
@@ -61,15 +53,30 @@ export function CommentSection({ taskId }: { taskId: string }) {
 
         if (error) {
             console.error(error)
+            setFetchingComments(false)
             return
         }
 
         if (!commentsData?.length) {
             setComments([])
+            setFetchingComments(false)
             return
         }
 
-        // Now fetch translations for these comments in current locale
+        // Fetch user profiles for comment authors
+        const authorIds = [...new Set(commentsData.map(c => c.author_id))]
+        const { data: usersData } = await supabase
+            .from("users")
+            .select("id, email")
+            .in("id", authorIds)
+
+        const usersMap: Record<string, UserProfile> = {}
+        usersData?.forEach(u => {
+            usersMap[u.id] = u
+        })
+        setUsers(usersMap)
+
+        // Fetch translations for current locale
         const commentIds = commentsData.map(c => c.id)
         const { data: translations } = await supabase
             .from("comment_translations")
@@ -77,22 +84,66 @@ export function CommentSection({ taskId }: { taskId: string }) {
             .in("comment_id", commentIds)
             .eq("locale", i18n.language)
 
-        // Merge
+        // Merge comments with translations
         const mergedComments = commentsData.map(c => {
-            const t = translations?.find(tr => tr.comment_id === c.id)
+            const translation = translations?.find(tr => tr.comment_id === c.id)
             return {
                 ...c,
-                content: t ? t.translated_content : c.content // Fallback to original
+                content: translation ? translation.translated_content : c.content
             }
         })
 
         setComments(mergedComments)
+        setFetchingComments(false)
         scrollToBottom()
     }
 
     const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+        setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+        }, 100)
     }
+
+    useEffect(() => {
+        fetchComments()
+
+        // Subscribe to comments
+        const channel = supabase
+            .channel(`comments:${taskId}`)
+            .on(
+                'postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'comments', filter: `task_id=eq.${taskId}` },
+                () => {
+                    fetchComments()
+                }
+            )
+            .on(
+                'postgres_changes',
+                { event: 'DELETE', schema: 'public', table: 'comments', filter: `task_id=eq.${taskId}` },
+                () => {
+                    fetchComments()
+                }
+            )
+            .subscribe()
+
+        // Subscribe to comment translations for current locale
+        const translationChannel = supabase
+            .channel(`comment-translations:${taskId}`)
+            .on(
+                'postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'comment_translations' },
+                () => {
+                    fetchComments()
+                }
+            )
+            .subscribe()
+
+        return () => {
+            supabase.removeChannel(channel)
+            supabase.removeChannel(translationChannel)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [taskId, i18n.language])
 
     const handlePostComment = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -100,22 +151,25 @@ export function CommentSection({ taskId }: { taskId: string }) {
 
         setLoading(true)
         const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
+        if (!user) {
+            setLoading(false)
+            return
+        }
 
-        // Call our API route to handle translation and insertion
+        // Call our API route to handle insertion and translation
         const res = await fetch('/api/comments', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 taskId,
-                content: newComment,
+                content: newComment.trim(),
                 userId: user.id
-                // Browser locale is detected by standard headers or we can pass it
             })
         })
 
         if (!res.ok) {
-            alert("Failed to post comment")
+            const data = await res.json()
+            alert(data.error || "Failed to post comment")
         } else {
             setNewComment("")
             // Realtime will handle the update
@@ -123,38 +177,126 @@ export function CommentSection({ taskId }: { taskId: string }) {
         setLoading(false)
     }
 
+    const formatTime = (dateString: string) => {
+        const date = new Date(dateString)
+        const now = new Date()
+        const diffMs = now.getTime() - date.getTime()
+        const diffMins = Math.floor(diffMs / 60000)
+        const diffHours = Math.floor(diffMs / 3600000)
+        const diffDays = Math.floor(diffMs / 86400000)
+
+        if (diffMins < 1) return 'Just now'
+        if (diffMins < 60) return `${diffMins}m ago`
+        if (diffHours < 24) return `${diffHours}h ago`
+        if (diffDays < 7) return `${diffDays}d ago`
+
+        return date.toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric'
+        })
+    }
+
     return (
-        <div className="flex flex-col h-[400px]">
-            <div className="flex-1 overflow-y-auto space-y-4 p-4 border rounded-md mb-4 bg-gray-50/50">
-                {comments.length === 0 ? <p className="text-gray-400 text-center">No comments yet</p> :
-                    comments.map(comment => (
-                        <div key={comment.id} className="bg-white p-3 rounded-lg shadow-sm border max-w-[80%]">
-                            <p className="text-sm">{comment.content}</p>
-                            <span className="text-xs text-gray-400">{new Date(comment.created_at).toLocaleTimeString()}</span>
+        <div className="flex flex-col h-[450px]">
+            {/* Comments List */}
+            <div className="flex-1 overflow-y-auto space-y-4 p-4 border rounded-xl mb-4 bg-gradient-to-b from-gray-50 to-white">
+                {fetchingComments ? (
+                    <div className="flex items-center justify-center h-full">
+                        <div className="flex flex-col items-center gap-2">
+                            <div className="w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                            <span className="text-sm text-gray-400">Loading comments...</span>
                         </div>
-                    ))
-                }
+                    </div>
+                ) : comments.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-full text-center">
+                        <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
+                            <Globe className="w-6 h-6 text-gray-400" />
+                        </div>
+                        <p className="text-gray-500 font-medium">{t("noComments")}</p>
+                        <p className="text-sm text-gray-400 mt-1">
+                            Start the conversation. Comments are translated automatically!
+                        </p>
+                    </div>
+                ) : (
+                    comments.map(comment => {
+                        const isOwn = comment.author_id === currentUserId
+                        const author = users[comment.author_id]
+
+                        return (
+                            <div
+                                key={comment.id}
+                                className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}
+                            >
+                                <div className={`flex gap-2 max-w-[80%] ${isOwn ? 'flex-row-reverse' : ''}`}>
+                                    {/* Avatar */}
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-medium shrink-0 ${isOwn
+                                        ? 'bg-gradient-to-br from-violet-500 to-indigo-600'
+                                        : 'bg-gradient-to-br from-gray-400 to-gray-500'
+                                        }`}>
+                                        {author?.email?.charAt(0).toUpperCase() || 'U'}
+                                    </div>
+
+                                    {/* Message */}
+                                    <div>
+                                        <div className={`p-3 rounded-2xl ${isOwn
+                                            ? 'bg-gradient-to-br from-violet-500 to-indigo-600 text-white rounded-br-md'
+                                            : 'bg-white border border-gray-200 text-gray-800 rounded-bl-md shadow-sm'
+                                            }`}>
+                                            <p className="text-sm whitespace-pre-wrap break-words">{comment.content}</p>
+                                        </div>
+                                        <div className={`flex items-center gap-2 mt-1 text-xs text-gray-400 ${isOwn ? 'justify-end' : ''}`}>
+                                            <span>{formatTime(comment.created_at)}</span>
+                                            {i18n.language !== 'en' && (
+                                                <span className="flex items-center gap-0.5">
+                                                    <Globe className="w-3 h-3" />
+                                                    <span>Translated</span>
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    })
+                )}
                 <div ref={messagesEndRef} />
             </div>
-            <div className="space-y-2">
+
+            {/* Input Form */}
+            <form onSubmit={handlePostComment} className="space-y-2">
                 <div className="flex gap-2">
-                    <Input
-                        value={newComment}
-                        onChange={(e) => setNewComment(e.target.value.slice(0, MAX_COMMENT_LENGTH))}
-                        placeholder={t("typeComment")}
-                        className="flex-1"
-                    />
-                    <Button
-                        onClick={handlePostComment}
-                        disabled={loading || newComment.trim().length === 0}
-                    >
-                        {loading ? t("loading") : t("send")}
-                    </Button>
+                    <div className="relative flex-1">
+                        <Input
+                            value={newComment}
+                            onChange={(e) => setNewComment(e.target.value.slice(0, MAX_COMMENT_LENGTH))}
+                            placeholder={t("typeComment")}
+                            className="pr-12 py-6 rounded-xl border-gray-200 focus:border-violet-400 focus:ring-violet-400"
+                            disabled={loading}
+                        />
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                            <Button
+                                type="submit"
+                                size="icon"
+                                disabled={loading || newComment.trim().length === 0}
+                                className="h-8 w-8 rounded-lg bg-gradient-to-r from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 disabled:opacity-50"
+                            >
+                                {loading ? (
+                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                ) : (
+                                    <Send className="w-4 h-4" />
+                                )}
+                            </Button>
+                        </div>
+                    </div>
                 </div>
-                <p className="text-xs text-gray-500 text-right">
-                    {newComment.length}/{MAX_COMMENT_LENGTH} characters
-                </p>
-            </div>
+                <div className="flex items-center justify-between text-xs text-gray-400 px-1">
+                    <span className="flex items-center gap-1">
+                        <Globe className="w-3 h-3" />
+                        Auto-translated to all team languages
+                    </span>
+                    <span>{newComment.length}/{MAX_COMMENT_LENGTH}</span>
+                </div>
+            </form>
         </div>
     )
 }
