@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, use } from "react"
+import { useEffect, useState, use, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { useRouter } from "next/navigation"
 import { CommentSection } from "@/components/shared/CommentSection"
@@ -34,6 +34,7 @@ import {
     Calendar
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { useToast } from "@/components/ui/toast"
 
 interface Task {
     id: string
@@ -91,38 +92,48 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
 
     const router = useRouter()
     const { t } = useTranslation()
+    const { showSuccess, showError, showLoading, hideToast } = useToast()
 
-    const fetchTask = async () => {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) {
-            router.push("/login")
-            return
-        }
+    // Prevent duplicate operations
+    const operationLockRef = useRef(false)
 
-        const { data: taskData, error } = await supabase
-            .from("tasks")
-            .select("*")
-            .eq("id", resolvedParams.taskId)
-            .single()
+    const fetchTask = useCallback(async () => {
+        try {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                router.replace("/login")
+                return
+            }
 
-        if (error || !taskData) {
-            console.error("Error fetching task:", error)
+            // Fetch task and project in parallel
+            const [taskResult, projectResult] = await Promise.all([
+                supabase
+                    .from("tasks")
+                    .select("*")
+                    .eq("id", resolvedParams.taskId)
+                    .single(),
+                supabase
+                    .from("projects")
+                    .select("id, name")
+                    .eq("id", resolvedParams.id)
+                    .single()
+            ])
+
+            if (taskResult.error || !taskResult.data) {
+                console.error("Error fetching task:", taskResult.error)
+                setLoading(false)
+                return
+            }
+
+            setTask(taskResult.data)
+            setProject(projectResult.data)
+        } catch (error) {
+            console.error("Fetch error:", error)
+            showError("Failed to load task")
+        } finally {
             setLoading(false)
-            return
         }
-
-        setTask(taskData)
-
-        // Fetch project name
-        const { data: projectData } = await supabase
-            .from("projects")
-            .select("id, name")
-            .eq("id", resolvedParams.id)
-            .single()
-
-        setProject(projectData)
-        setLoading(false)
-    }
+    }, [resolvedParams.taskId, resolvedParams.id, router, showError])
 
     useEffect(() => {
         fetchTask()
@@ -136,8 +147,9 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                 (payload) => {
                     if (payload.eventType === 'DELETE') {
                         router.push(`/project/${resolvedParams.id}`)
-                    } else {
-                        fetchTask()
+                    } else if (payload.eventType === 'UPDATE') {
+                        // Update task directly from payload
+                        setTask(payload.new as Task)
                     }
                 }
             )
@@ -146,57 +158,103 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
         return () => {
             supabase.removeChannel(channel)
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [resolvedParams.taskId, resolvedParams.id])
+    }, [resolvedParams.taskId, resolvedParams.id, fetchTask, router])
 
     const handleUpdateTask = async () => {
+        if (operationLockRef.current || saving) return
         if (!task || !editTitle.trim()) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("tasks")
-            .update({
-                title: editTitle.trim(),
-                description: editDesc.trim(),
-                status: editStatus,
-            })
-            .eq("id", task.id)
+        const loadingToast = showLoading("Updating task...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            setEditOpen(false)
+        try {
+            const { data, error } = await supabase
+                .from("tasks")
+                .update({
+                    title: editTitle.trim(),
+                    description: editDesc.trim(),
+                    status: editStatus,
+                })
+                .eq("id", task.id)
+                .select()
+                .single()
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                setTask(data)
+                setEditOpen(false)
+                showSuccess("Task updated successfully!")
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Update error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleDeleteTask = async () => {
+        if (operationLockRef.current || saving) return
         if (!task) return
 
+        operationLockRef.current = true
         setSaving(true)
-        const { error } = await supabase
-            .from("tasks")
-            .delete()
-            .eq("id", task.id)
+        const loadingToast = showLoading("Deleting task...")
 
-        if (error) {
-            alert(error.message)
-        } else {
-            router.push(`/project/${resolvedParams.id}`)
+        try {
+            const { error } = await supabase
+                .from("tasks")
+                .delete()
+                .eq("id", task.id)
+
+            hideToast(loadingToast)
+
+            if (error) {
+                showError(error.message)
+            } else {
+                showSuccess("Task deleted successfully!")
+                router.push(`/project/${resolvedParams.id}`)
+            }
+        } catch (error) {
+            hideToast(loadingToast)
+            showError("An unexpected error occurred")
+            console.error("Delete error:", error)
+        } finally {
+            setSaving(false)
+            operationLockRef.current = false
         }
-        setSaving(false)
     }
 
     const handleQuickStatusChange = async (newStatus: 'todo' | 'in-progress' | 'done') => {
-        if (!task) return
+        if (operationLockRef.current || !task) return
 
-        const { error } = await supabase
-            .from("tasks")
-            .update({ status: newStatus })
-            .eq("id", task.id)
+        const previousStatus = task.status
 
-        if (error) {
-            alert(error.message)
+        // Optimistic update
+        setTask(prev => prev ? { ...prev, status: newStatus } : prev)
+
+        try {
+            const { error } = await supabase
+                .from("tasks")
+                .update({ status: newStatus })
+                .eq("id", task.id)
+
+            if (error) {
+                // Rollback on error
+                setTask(prev => prev ? { ...prev, status: previousStatus } : prev)
+                showError(error.message)
+            }
+        } catch (error) {
+            // Rollback on error
+            setTask(prev => prev ? { ...prev, status: previousStatus } : prev)
+            showError("Failed to update status")
+            console.error("Status update error:", error)
         }
     }
 
@@ -237,7 +295,6 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
     }
 
     const statusConfig = STATUS_CONFIG[task.status]
-    const StatusIcon = statusConfig.icon
 
     return (
         <div className="p-8 max-w-4xl mx-auto space-y-6">
@@ -377,54 +434,66 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                             Update task details.
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="grid gap-4 py-4">
-                        <div className="space-y-2">
-                            <Label htmlFor="edit-title">Title</Label>
-                            <Input
-                                id="edit-title"
-                                value={editTitle}
-                                onChange={(e) => setEditTitle(e.target.value)}
-                            />
+                    <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(); }}>
+                        <div className="grid gap-4 py-4">
+                            <div className="space-y-2">
+                                <Label htmlFor="edit-title">Title</Label>
+                                <Input
+                                    id="edit-title"
+                                    value={editTitle}
+                                    onChange={(e) => setEditTitle(e.target.value)}
+                                    disabled={saving}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label htmlFor="edit-desc">Description</Label>
+                                <textarea
+                                    id="edit-desc"
+                                    value={editDesc}
+                                    onChange={(e) => setEditDesc(e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-200 rounded-md min-h-[100px] focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                    placeholder="Add more details..."
+                                    disabled={saving}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label>Status</Label>
+                                <Select
+                                    value={editStatus}
+                                    onValueChange={(v) => setEditStatus(v as typeof editStatus)}
+                                    disabled={saving}
+                                >
+                                    <SelectTrigger>
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="todo">To Do</SelectItem>
+                                        <SelectItem value="in-progress">In Progress</SelectItem>
+                                        <SelectItem value="done">Done</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="edit-desc">Description</Label>
-                            <textarea
-                                id="edit-desc"
-                                value={editDesc}
-                                onChange={(e) => setEditDesc(e.target.value)}
-                                className="w-full px-3 py-2 border border-gray-200 rounded-md min-h-[100px] focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                placeholder="Add more details..."
-                            />
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Status</Label>
-                            <Select
-                                value={editStatus}
-                                onValueChange={(v) => setEditStatus(v as typeof editStatus)}
+                        <DialogFooter>
+                            <Button type="button" variant="outline" onClick={() => setEditOpen(false)} disabled={saving}>
+                                Cancel
+                            </Button>
+                            <Button
+                                type="submit"
+                                disabled={saving || !editTitle.trim()}
+                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
                             >
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="todo">To Do</SelectItem>
-                                    <SelectItem value="in-progress">In Progress</SelectItem>
-                                    <SelectItem value="done">Done</SelectItem>
-                                </SelectContent>
-                            </Select>
-                        </div>
-                    </div>
-                    <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditOpen(false)}>
-                            Cancel
-                        </Button>
-                        <Button
-                            onClick={handleUpdateTask}
-                            disabled={saving || !editTitle.trim()}
-                            className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                        >
-                            {saving ? "Saving..." : "Save Changes"}
-                        </Button>
-                    </DialogFooter>
+                                {saving ? (
+                                    <span className="flex items-center gap-2">
+                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                        Saving...
+                                    </span>
+                                ) : (
+                                    "Save Changes"
+                                )}
+                            </Button>
+                        </DialogFooter>
+                    </form>
                 </DialogContent>
             </Dialog>
 
@@ -439,7 +508,7 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+                        <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={saving}>
                             Cancel
                         </Button>
                         <Button
@@ -447,7 +516,14 @@ export default function TaskView({ params }: { params: Promise<{ id: string, tas
                             onClick={handleDeleteTask}
                             disabled={saving}
                         >
-                            {saving ? "Deleting..." : "Delete Task"}
+                            {saving ? (
+                                <span className="flex items-center gap-2">
+                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                    Deleting...
+                                </span>
+                            ) : (
+                                "Delete Task"
+                            )}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
