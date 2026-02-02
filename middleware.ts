@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
-export function middleware(request: NextRequest) {
+export function middleware(_request: NextRequest) {
     // Simple middleware to pass through requests
     // In a full implementation, we might handle locale redirection here
     return NextResponse.next()
