@@ -3,14 +3,15 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { LanguageSelector } from "@/components/shared/LanguageSelector";
 import { UserMenu } from "@/components/shared/UserMenu";
-import { I18nProvider } from "@/components/providers/I18nProvider";
+import { LingoProvider } from "@/components/providers/LingoProvider";
 import { ToastProvider } from "@/components/ui/toast";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "PolyTask",
-  description: "Multilingual collaborative task management",
+  title: "PolyTask - Multilingual Task Management",
+  description: "Collaborative multilingual task management for global teams. Real-time translation powered by Lingo.dev.",
+  keywords: ["task management", "multilingual", "collaboration", "team", "translation", "lingo.dev"],
 };
 
 export default function RootLayout({
@@ -19,9 +20,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
-        <I18nProvider>
+        <LingoProvider>
           <ToastProvider>
             <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 via-white to-slate-100">
               <header className="sticky top-0 z-50 border-b bg-white/80 backdrop-blur-md h-16 flex items-center px-6 justify-between shadow-sm">
@@ -43,7 +44,7 @@ export default function RootLayout({
               </main>
             </div>
           </ToastProvider>
-        </I18nProvider>
+        </LingoProvider>
       </body>
     </html>
   );
