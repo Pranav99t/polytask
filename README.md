@@ -22,40 +22,6 @@ A collaborative, multilingual task management web app for global teams built wit
 - **i18n**: i18next & react-i18next
 - **Language**: TypeScript
 
-## 📦 Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/Pranav99t/PolyTask.git
-
-# Navigate to project directory
-cd PolyTask
-
-# Install dependencies
-npm install
-
-# Set up environment variables
-cp .env.example .env.local
-# Add your Supabase credentials
-
-# Run development server
-npm run dev
-```
-
-## 🔧 Environment Variables
-
-Create a `.env.local` file with:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-```
-
-## 🗄️ Database Setup
-
-1. Create a new Supabase project
-2. Run the SQL schema from `supabase/schema.sql`
-3. Disable email confirmation in Auth settings (for testing)
 
 ## 🎯 Usage
 
@@ -70,10 +36,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 - 🇬🇧 English
 - 🇪🇸 Spanish (Español)
 - 🇮🇳 Hindi (हिंदी)
-
-## 📝 License
-
-MIT License
+- More soon 
 
 ## 👨‍💻 Author
 
