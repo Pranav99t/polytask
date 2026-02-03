@@ -33,7 +33,9 @@ import {
     Circle,
     MoreVertical,
     MessageSquare,
-    Settings2
+    Settings2,
+    Users,
+    User
 } from "lucide-react"
 import { useToast } from "@/components/ui/toast"
 
@@ -43,6 +45,8 @@ interface Task {
     description: string
     status: 'todo' | 'in-progress' | 'done'
     project_id: string
+    assigned_to: string | null
+    created_by: string
     created_at: string
 }
 
@@ -50,7 +54,18 @@ interface Project {
     id: string
     name: string
     description: string
-    owner_id: string
+    organisation_id: string
+    created_by: string
+}
+
+interface TeamMember {
+    user_id: string
+    role: string
+    users: {
+        id: string
+        email: string
+        full_name: string
+    }
 }
 
 const STATUS_CONFIG = {
@@ -81,13 +96,17 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const resolvedParams = use(params)
     const [project, setProject] = useState<Project | null>(null)
     const [tasks, setTasks] = useState<Task[]>([])
+    const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
     const [loading, setLoading] = useState(true)
+    const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+    const [userRole, setUserRole] = useState<'leader' | 'admin' | 'member'>('member')
 
     // Create task
     const [createOpen, setCreateOpen] = useState(false)
     const [newTaskTitle, setNewTaskTitle] = useState("")
     const [newTaskDesc, setNewTaskDesc] = useState("")
     const [newTaskStatus, setNewTaskStatus] = useState<'todo' | 'in-progress' | 'done'>('todo')
+    const [newTaskAssignee, setNewTaskAssignee] = useState<string>("unassigned")
 
     // Edit task
     const [editOpen, setEditOpen] = useState(false)
@@ -95,6 +114,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const [editTitle, setEditTitle] = useState("")
     const [editDesc, setEditDesc] = useState("")
     const [editStatus, setEditStatus] = useState<'todo' | 'in-progress' | 'done'>('todo')
+    const [editAssignee, setEditAssignee] = useState<string>("unassigned")
 
     // Delete task
     const [deleteOpen, setDeleteOpen] = useState(false)
@@ -110,8 +130,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
     const router = useRouter()
     const { showSuccess, showError, showLoading, hideToast } = useToast()
-
-    // Prevent duplicate operations
     const operationLockRef = useRef(false)
 
     const fetchProjectAndTasks = useCallback(async (showLoadingState = true) => {
@@ -123,31 +141,50 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 router.replace("/login")
                 return
             }
+            setCurrentUserId(user.id)
 
-            // Fetch Project and Tasks in parallel
-            const [projectResult, tasksResult] = await Promise.all([
-                supabase
-                    .from("projects")
-                    .select("*")
-                    .eq("id", resolvedParams.id)
-                    .single(),
+            // Fetch Project
+            const { data: projectData, error: projectError } = await supabase
+                .from("projects")
+                .select("*")
+                .eq("id", resolvedParams.id)
+                .single()
+
+            if (projectError || !projectData) {
+                console.error("Error fetching project:", projectError)
+                setLoading(false)
+                return
+            }
+            setProject(projectData)
+
+            // Fetch Tasks and Team Members in parallel
+            const [tasksResult, membersResult] = await Promise.all([
                 supabase
                     .from("tasks")
                     .select("*")
                     .eq("project_id", resolvedParams.id)
-                    .order("created_at", { ascending: false })
+                    .order("created_at", { ascending: false }),
+                supabase
+                    .from("organisation_members")
+                    .select(`
+                        user_id,
+                        role,
+                        users (id, email, full_name)
+                    `)
+                    .eq("organisation_id", projectData.organisation_id)
             ])
 
-            if (projectResult.error) {
-                console.error("Error fetching project:", projectResult.error)
-            } else {
-                setProject(projectResult.data)
-            }
-
-            if (tasksResult.error) {
-                console.error("Error fetching tasks:", tasksResult.error)
-            } else {
+            if (!tasksResult.error) {
                 setTasks(tasksResult.data || [])
+            }
+            if (!membersResult.error) {
+                const members = membersResult.data as unknown as TeamMember[]
+                setTeamMembers(members)
+                // Find current user's role
+                const currentMember = members.find(m => m.user_id === user.id)
+                if (currentMember) {
+                    setUserRole(currentMember.role as 'leader' | 'admin' | 'member')
+                }
             }
         } catch (error) {
             console.error("Fetch error:", error)
@@ -167,9 +204,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 'postgres_changes',
                 { event: '*', schema: 'public', table: 'tasks', filter: `project_id=eq.${resolvedParams.id}` },
                 (payload) => {
-                    // Handle realtime updates without full refetch
                     if (payload.eventType === 'INSERT') {
-                        setTasks(prev => [payload.new as Task, ...prev])
+                        setTasks(prev => {
+                            // Don't add if already exists (optimistic update already added it)
+                            if (prev.some(t => t.id === (payload.new as Task).id)) {
+                                return prev
+                            }
+                            return [payload.new as Task, ...prev]
+                        })
                     } else if (payload.eventType === 'UPDATE') {
                         setTasks(prev => prev.map(t =>
                             t.id === (payload.new as Task).id ? (payload.new as Task) : t
@@ -186,7 +228,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         }
     }, [resolvedParams.id, fetchProjectAndTasks])
 
-    // Close menu when clicking outside
+    // Close menu on outside click
     useEffect(() => {
         const handleClickOutside = () => setActiveMenu(null)
         if (activeMenu) {
@@ -207,6 +249,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         setTitleError("")
         return true
     }, [])
+
+    const getMemberName = (userId: string | null) => {
+        if (!userId) return 'Unassigned'
+        const member = teamMembers.find(m => m.user_id === userId)
+        return member?.users?.full_name || member?.users?.email || 'Unknown'
+    }
 
     const handleCreateTask = async () => {
         if (operationLockRef.current || saving) return
@@ -231,7 +279,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     title: newTaskTitle.trim(),
                     description: newTaskDesc.trim(),
                     status: newTaskStatus,
-                    assigned_to: user.id
+                    assigned_to: newTaskAssignee === 'unassigned' ? null : newTaskAssignee,
+                    created_by: user.id
                 })
                 .select()
                 .single()
@@ -241,12 +290,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             if (error) {
                 showError(error.message)
             } else {
-                // Optimistic update - add to list immediately
                 setTasks(prev => [data, ...prev])
                 setCreateOpen(false)
                 setNewTaskTitle("")
                 setNewTaskDesc("")
                 setNewTaskStatus('todo')
+                setNewTaskAssignee("unassigned")
                 setTitleError("")
                 showSuccess("Task created successfully!")
             }
@@ -275,6 +324,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     title: editTitle.trim(),
                     description: editDesc.trim(),
                     status: editStatus,
+                    assigned_to: editAssignee === 'unassigned' ? null : editAssignee
                 })
                 .eq("id", selectedTask.id)
                 .select()
@@ -285,7 +335,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             if (error) {
                 showError(error.message)
             } else {
-                // Optimistic update
                 setTasks(prev => prev.map(t => t.id === selectedTask.id ? data : t))
                 setEditOpen(false)
                 setTitleError("")
@@ -320,7 +369,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             if (error) {
                 showError(error.message)
             } else {
-                // Optimistic update
                 setTasks(prev => prev.filter(t => t.id !== selectedTask.id))
                 setDeleteOpen(false)
                 showSuccess("Task deleted successfully!")
@@ -338,7 +386,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const handleQuickStatusChange = async (task: Task, newStatus: 'todo' | 'in-progress' | 'done') => {
         if (operationLockRef.current) return
 
-        // Optimistic update first
         setTasks(prev => prev.map(t =>
             t.id === task.id ? { ...t, status: newStatus } : t
         ))
@@ -351,19 +398,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 .eq("id", task.id)
 
             if (error) {
-                // Rollback on error
                 setTasks(prev => prev.map(t =>
                     t.id === task.id ? { ...t, status: task.status } : t
                 ))
                 showError(error.message)
             }
         } catch (error) {
-            // Rollback on error
             setTasks(prev => prev.map(t =>
                 t.id === task.id ? { ...t, status: task.status } : t
             ))
             showError("Failed to update status")
-            console.error("Status update error:", error)
         }
     }
 
@@ -398,7 +442,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         } catch (error) {
             hideToast(loadingToast)
             showError("An unexpected error occurred")
-            console.error("Update error:", error)
         } finally {
             setSaving(false)
             operationLockRef.current = false
@@ -411,6 +454,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         setEditTitle(task.title)
         setEditDesc(task.description || "")
         setEditStatus(task.status)
+        setEditAssignee(task.assigned_to || "unassigned")
         setTitleError("")
         setEditOpen(true)
         setActiveMenu(null)
@@ -429,6 +473,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             setNewTaskTitle("")
             setNewTaskDesc("")
             setNewTaskStatus('todo')
+            setNewTaskAssignee("")
             setTitleError("")
         }
     }
@@ -466,6 +511,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         )
     }
 
+    const canManageProject = userRole === 'leader' || userRole === 'admin'
+
     return (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
             {/* Header */}
@@ -482,106 +529,152 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     <div>
                         <div className="flex items-center gap-3">
                             <h1 className="text-3xl font-bold text-gray-900">{project.name}</h1>
-                            <button
-                                onClick={() => {
-                                    setEditProjectName(project.name)
-                                    setEditProjectDesc(project.description || "")
-                                    setEditProjectOpen(true)
-                                }}
-                                className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"
-                            >
-                                <Settings2 className="w-4 h-4" />
-                            </button>
+                            {canManageProject && (
+                                <button
+                                    onClick={() => {
+                                        setEditProjectName(project.name)
+                                        setEditProjectDesc(project.description || "")
+                                        setEditProjectOpen(true)
+                                    }}
+                                    className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"
+                                >
+                                    <Settings2 className="w-4 h-4" />
+                                </button>
+                            )}
                         </div>
                         <p className="text-gray-500 mt-1">{project.description || "No description"}</p>
+                        <div className="flex items-center gap-2 mt-2">
+                            <Users className="w-4 h-4 text-gray-400" />
+                            <div className="flex -space-x-2">
+                                {teamMembers.slice(0, 4).map((member) => (
+                                    <div
+                                        key={member.user_id}
+                                        className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500 border-2 border-white flex items-center justify-center text-xs text-white font-medium"
+                                        title={member.users?.full_name || member.users?.email}
+                                    >
+                                        {(member.users?.full_name || member.users?.email || 'U').charAt(0).toUpperCase()}
+                                    </div>
+                                ))}
+                                {teamMembers.length > 4 && (
+                                    <div className="w-6 h-6 rounded-full bg-gray-200 border-2 border-white flex items-center justify-center text-xs text-gray-600 font-medium">
+                                        +{teamMembers.length - 4}
+                                    </div>
+                                )}
+                            </div>
+                            <span className="text-xs text-gray-500">{teamMembers.length} team members</span>
+                        </div>
                     </div>
                 </div>
 
-                <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
-                    <DialogTrigger asChild>
-                        <Button className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 shadow-lg shadow-violet-200">
-                            <Plus className="mr-2 h-4 w-4" /> Add Task
-                        </Button>
-                    </DialogTrigger>
-                    <DialogContent className="sm:max-w-[500px]">
-                        <DialogHeader>
-                            <DialogTitle>Create New Task</DialogTitle>
-                            <DialogDescription>
-                                Add a new task to this project.
-                            </DialogDescription>
-                        </DialogHeader>
-                        <form onSubmit={(e) => { e.preventDefault(); handleCreateTask(); }}>
-                            <div className="grid gap-4 py-4">
-                                <div className="space-y-2">
-                                    <Label htmlFor="task-title">
-                                        Title <span className="text-red-500">*</span>
-                                    </Label>
-                                    <Input
-                                        id="task-title"
-                                        value={newTaskTitle}
-                                        onChange={(e) => {
-                                            setNewTaskTitle(e.target.value)
-                                            if (titleError) validateTitle(e.target.value)
-                                        }}
-                                        placeholder="e.g., Design landing page mockup"
-                                        className={titleError ? "border-red-500" : ""}
-                                        disabled={saving}
-                                        autoFocus
-                                    />
-                                    {titleError && (
-                                        <p className="text-sm text-red-500">{titleError}</p>
-                                    )}
+                {canManageProject && (
+                    <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
+                        <DialogTrigger asChild>
+                            <Button className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 shadow-lg shadow-violet-200">
+                                <Plus className="mr-2 h-4 w-4" /> Add Task
+                            </Button>
+                        </DialogTrigger>
+                        <DialogContent className="sm:max-w-[500px]">
+                            <DialogHeader>
+                                <DialogTitle>Create New Task</DialogTitle>
+                                <DialogDescription>
+                                    Add a new task to this project.
+                                </DialogDescription>
+                            </DialogHeader>
+                            <form onSubmit={(e) => { e.preventDefault(); handleCreateTask(); }}>
+                                <div className="grid gap-4 py-4">
+                                    <div className="space-y-2">
+                                        <Label htmlFor="task-title">
+                                            Title <span className="text-red-500">*</span>
+                                        </Label>
+                                        <Input
+                                            id="task-title"
+                                            value={newTaskTitle}
+                                            onChange={(e) => {
+                                                setNewTaskTitle(e.target.value)
+                                                if (titleError) validateTitle(e.target.value)
+                                            }}
+                                            placeholder="e.g., Design landing page mockup"
+                                            className={titleError ? "border-red-500" : ""}
+                                            disabled={saving}
+                                            autoFocus
+                                        />
+                                        {titleError && (
+                                            <p className="text-sm text-red-500">{titleError}</p>
+                                        )}
+                                    </div>
+                                    <div className="space-y-2">
+                                        <Label htmlFor="task-desc">Description</Label>
+                                        <Input
+                                            id="task-desc"
+                                            value={newTaskDesc}
+                                            onChange={(e) => setNewTaskDesc(e.target.value)}
+                                            placeholder="Add more details..."
+                                            disabled={saving}
+                                        />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-2">
+                                            <Label>Status</Label>
+                                            <Select
+                                                value={newTaskStatus}
+                                                onValueChange={(v) => setNewTaskStatus(v as typeof newTaskStatus)}
+                                                disabled={saving}
+                                            >
+                                                <SelectTrigger>
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="todo">To Do</SelectItem>
+                                                    <SelectItem value="in-progress">In Progress</SelectItem>
+                                                    <SelectItem value="done">Done</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <Label>Assign To</Label>
+                                            <Select
+                                                value={newTaskAssignee}
+                                                onValueChange={setNewTaskAssignee}
+                                                disabled={saving}
+                                            >
+                                                <SelectTrigger>
+                                                    <SelectValue placeholder="Unassigned" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="unassigned">Unassigned</SelectItem>
+                                                    {teamMembers.map(member => (
+                                                        <SelectItem key={member.user_id} value={member.user_id}>
+                                                            {member.users?.full_name || member.users?.email}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="space-y-2">
-                                    <Label htmlFor="task-desc">Description</Label>
-                                    <Input
-                                        id="task-desc"
-                                        value={newTaskDesc}
-                                        onChange={(e) => setNewTaskDesc(e.target.value)}
-                                        placeholder="Add more details..."
+                                <DialogFooter>
+                                    <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={saving}>
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        type="submit"
                                         disabled={saving}
-                                    />
-                                </div>
-                                <div className="space-y-2">
-                                    <Label>Status</Label>
-                                    <Select
-                                        value={newTaskStatus}
-                                        onValueChange={(v) => setNewTaskStatus(v as typeof newTaskStatus)}
-                                        disabled={saving}
+                                        className="bg-gradient-to-r from-violet-600 to-indigo-600"
                                     >
-                                        <SelectTrigger>
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="todo">To Do</SelectItem>
-                                            <SelectItem value="in-progress">In Progress</SelectItem>
-                                            <SelectItem value="done">Done</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                            </div>
-                            <DialogFooter>
-                                <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={saving}>
-                                    Cancel
-                                </Button>
-                                <Button
-                                    type="submit"
-                                    disabled={saving}
-                                    className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                                >
-                                    {saving ? (
-                                        <span className="flex items-center gap-2">
-                                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                            Creating...
-                                        </span>
-                                    ) : (
-                                        "Create Task"
-                                    )}
-                                </Button>
-                            </DialogFooter>
-                        </form>
-                    </DialogContent>
-                </Dialog>
+                                        {saving ? (
+                                            <span className="flex items-center gap-2">
+                                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                                Creating...
+                                            </span>
+                                        ) : (
+                                            "Create Task"
+                                        )}
+                                    </Button>
+                                </DialogFooter>
+                            </form>
+                        </DialogContent>
+                    </Dialog>
+                )}
             </div>
 
             {/* Task Board */}
@@ -593,14 +686,18 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         </div>
                         <h3 className="text-lg font-semibold text-gray-900 mb-2">No tasks yet</h3>
                         <p className="text-gray-500 mb-6 max-w-sm mx-auto">
-                            Add your first task to start tracking progress
+                            {canManageProject
+                                ? "Add your first task to start tracking progress"
+                                : "Tasks will appear here once your team leader creates them"}
                         </p>
-                        <Button
-                            onClick={() => setCreateOpen(true)}
-                            className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                        >
-                            <Plus className="mr-2 h-4 w-4" /> Create Your First Task
-                        </Button>
+                        {canManageProject && (
+                            <Button
+                                onClick={() => setCreateOpen(true)}
+                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
+                            >
+                                <Plus className="mr-2 h-4 w-4" /> Create Your First Task
+                            </Button>
+                        )}
                     </CardContent>
                 </Card>
             ) : (
@@ -634,77 +731,88 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                                     <h4 className={`font-medium text-gray-900 ${status === 'done' ? 'line-through text-gray-500' : ''}`}>
                                                         {task.title}
                                                     </h4>
-                                                    <div className="relative">
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                setActiveMenu(activeMenu === task.id ? null : task.id)
-                                                            }}
-                                                            className="p-1.5 rounded-lg hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                        >
-                                                            <MoreVertical className="w-4 h-4 text-gray-400" />
-                                                        </button>
-                                                        {activeMenu === task.id && (
-                                                            <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border py-1 z-10">
-                                                                <button
-                                                                    onClick={(e) => openEditDialog(task, e)}
-                                                                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                                                >
-                                                                    <Pencil className="w-4 h-4" /> Edit
-                                                                </button>
-                                                                <div className="border-t my-1" />
-                                                                {status !== 'todo' && (
+                                                    {canManageProject && (
+                                                        <div className="relative">
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
+                                                                    setActiveMenu(activeMenu === task.id ? null : task.id)
+                                                                }}
+                                                                className="p-1.5 rounded-lg hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                            >
+                                                                <MoreVertical className="w-4 h-4 text-gray-400" />
+                                                            </button>
+                                                            {activeMenu === task.id && (
+                                                                <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border py-1 z-10">
                                                                     <button
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation()
-                                                                            handleQuickStatusChange(task, 'todo')
-                                                                        }}
+                                                                        onClick={(e) => openEditDialog(task, e)}
                                                                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                                                     >
-                                                                        <Circle className="w-4 h-4" /> Move to To Do
+                                                                        <Pencil className="w-4 h-4" /> Edit
                                                                     </button>
-                                                                )}
-                                                                {status !== 'in-progress' && (
+                                                                    <div className="border-t my-1" />
+                                                                    {status !== 'todo' && (
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation()
+                                                                                handleQuickStatusChange(task, 'todo')
+                                                                            }}
+                                                                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                                                        >
+                                                                            <Circle className="w-4 h-4" /> Move to To Do
+                                                                        </button>
+                                                                    )}
+                                                                    {status !== 'in-progress' && (
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation()
+                                                                                handleQuickStatusChange(task, 'in-progress')
+                                                                            }}
+                                                                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                                                        >
+                                                                            <Clock className="w-4 h-4" /> Move to In Progress
+                                                                        </button>
+                                                                    )}
+                                                                    {status !== 'done' && (
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation()
+                                                                                handleQuickStatusChange(task, 'done')
+                                                                            }}
+                                                                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                                                        >
+                                                                            <CheckCircle2 className="w-4 h-4" /> Mark as Done
+                                                                        </button>
+                                                                    )}
+                                                                    <div className="border-t my-1" />
                                                                     <button
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation()
-                                                                            handleQuickStatusChange(task, 'in-progress')
-                                                                        }}
-                                                                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                                                        onClick={(e) => openDeleteDialog(task, e)}
+                                                                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
                                                                     >
-                                                                        <Clock className="w-4 h-4" /> Move to In Progress
+                                                                        <Trash2 className="w-4 h-4" /> Delete
                                                                     </button>
-                                                                )}
-                                                                {status !== 'done' && (
-                                                                    <button
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation()
-                                                                            handleQuickStatusChange(task, 'done')
-                                                                        }}
-                                                                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                                                    >
-                                                                        <CheckCircle2 className="w-4 h-4" /> Mark as Done
-                                                                    </button>
-                                                                )}
-                                                                <div className="border-t my-1" />
-                                                                <button
-                                                                    onClick={(e) => openDeleteDialog(task, e)}
-                                                                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                                                                >
-                                                                    <Trash2 className="w-4 h-4" /> Delete
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
                                                 </div>
                                                 {task.description && (
                                                     <p className="text-sm text-gray-500 mt-2 line-clamp-2">
                                                         {task.description}
                                                     </p>
                                                 )}
-                                                <div className="flex items-center gap-2 mt-3 text-xs text-gray-400">
-                                                    <MessageSquare className="w-3.5 h-3.5" />
-                                                    <span>View details</span>
+                                                <div className="flex items-center justify-between mt-3">
+                                                    <div className="flex items-center gap-2 text-xs text-gray-400">
+                                                        <MessageSquare className="w-3.5 h-3.5" />
+                                                        <span>View details</span>
+                                                    </div>
+                                                    {task.assigned_to && (
+                                                        <div className="flex items-center gap-1 text-xs text-gray-500">
+                                                            <div className="w-5 h-5 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500 flex items-center justify-center text-white text-[10px]">
+                                                                {getMemberName(task.assigned_to).charAt(0).toUpperCase()}
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </CardContent>
                                         </Card>
@@ -721,16 +829,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <DialogContent className="sm:max-w-[500px]">
                     <DialogHeader>
                         <DialogTitle>Edit Task</DialogTitle>
-                        <DialogDescription>
-                            Update task details.
-                        </DialogDescription>
                     </DialogHeader>
                     <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(); }}>
                         <div className="grid gap-4 py-4">
                             <div className="space-y-2">
-                                <Label htmlFor="edit-title">
-                                    Title <span className="text-red-500">*</span>
-                                </Label>
+                                <Label htmlFor="edit-title">Title</Label>
                                 <Input
                                     id="edit-title"
                                     value={editTitle}
@@ -741,9 +844,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                     className={titleError ? "border-red-500" : ""}
                                     disabled={saving}
                                 />
-                                {titleError && (
-                                    <p className="text-sm text-red-500">{titleError}</p>
-                                )}
+                                {titleError && <p className="text-sm text-red-500">{titleError}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="edit-desc">Description</Label>
@@ -754,41 +855,38 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                                     disabled={saving}
                                 />
                             </div>
-                            <div className="space-y-2">
-                                <Label>Status</Label>
-                                <Select
-                                    value={editStatus}
-                                    onValueChange={(v) => setEditStatus(v as typeof editStatus)}
-                                    disabled={saving}
-                                >
-                                    <SelectTrigger>
-                                        <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        <SelectItem value="todo">To Do</SelectItem>
-                                        <SelectItem value="in-progress">In Progress</SelectItem>
-                                        <SelectItem value="done">Done</SelectItem>
-                                    </SelectContent>
-                                </Select>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <Label>Status</Label>
+                                    <Select value={editStatus} onValueChange={(v) => setEditStatus(v as typeof editStatus)} disabled={saving}>
+                                        <SelectTrigger><SelectValue /></SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="todo">To Do</SelectItem>
+                                            <SelectItem value="in-progress">In Progress</SelectItem>
+                                            <SelectItem value="done">Done</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>Assign To</Label>
+                                    <Select value={editAssignee} onValueChange={setEditAssignee} disabled={saving}>
+                                        <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="unassigned">Unassigned</SelectItem>
+                                            {teamMembers.map(member => (
+                                                <SelectItem key={member.user_id} value={member.user_id}>
+                                                    {member.users?.full_name || member.users?.email}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
                             </div>
                         </div>
                         <DialogFooter>
-                            <Button type="button" variant="outline" onClick={() => setEditOpen(false)} disabled={saving}>
-                                Cancel
-                            </Button>
-                            <Button
-                                type="submit"
-                                disabled={saving}
-                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                            >
-                                {saving ? (
-                                    <span className="flex items-center gap-2">
-                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                        Saving...
-                                    </span>
-                                ) : (
-                                    "Save Changes"
-                                )}
+                            <Button type="button" variant="outline" onClick={() => setEditOpen(false)} disabled={saving}>Cancel</Button>
+                            <Button type="submit" disabled={saving} className="bg-gradient-to-r from-violet-600 to-indigo-600">
+                                {saving ? "Saving..." : "Save Changes"}
                             </Button>
                         </DialogFooter>
                     </form>
@@ -802,26 +900,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         <DialogTitle className="text-red-600">Delete Task</DialogTitle>
                         <DialogDescription>
                             Are you sure you want to delete <strong>{selectedTask?.title}</strong>?
-                            This will also delete all comments. This action cannot be undone.
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={saving}>
-                            Cancel
-                        </Button>
-                        <Button
-                            variant="destructive"
-                            onClick={handleDeleteTask}
-                            disabled={saving}
-                        >
-                            {saving ? (
-                                <span className="flex items-center gap-2">
-                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                    Deleting...
-                                </span>
-                            ) : (
-                                "Delete Task"
-                            )}
+                        <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={saving}>Cancel</Button>
+                        <Button variant="destructive" onClick={handleDeleteTask} disabled={saving}>
+                            {saving ? "Deleting..." : "Delete Task"}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
@@ -832,9 +916,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <DialogContent className="sm:max-w-[425px]">
                     <DialogHeader>
                         <DialogTitle>Edit Project</DialogTitle>
-                        <DialogDescription>
-                            Update project details.
-                        </DialogDescription>
                     </DialogHeader>
                     <form onSubmit={(e) => { e.preventDefault(); handleUpdateProject(); }}>
                         <div className="grid gap-4 py-4">
@@ -858,22 +939,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             </div>
                         </div>
                         <DialogFooter>
-                            <Button type="button" variant="outline" onClick={() => setEditProjectOpen(false)} disabled={saving}>
-                                Cancel
-                            </Button>
-                            <Button
-                                type="submit"
-                                disabled={saving}
-                                className="bg-gradient-to-r from-violet-600 to-indigo-600"
-                            >
-                                {saving ? (
-                                    <span className="flex items-center gap-2">
-                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                        Saving...
-                                    </span>
-                                ) : (
-                                    "Save Changes"
-                                )}
+                            <Button type="button" variant="outline" onClick={() => setEditProjectOpen(false)} disabled={saving}>Cancel</Button>
+                            <Button type="submit" disabled={saving} className="bg-gradient-to-r from-violet-600 to-indigo-600">
+                                {saving ? "Saving..." : "Save Changes"}
                             </Button>
                         </DialogFooter>
                     </form>
