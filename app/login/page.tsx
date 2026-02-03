@@ -25,6 +25,17 @@ export default function LoginPage() {
     // Prevent duplicate submissions
     const isSubmittingRef = useRef(false)
 
+    // Helper to check if user has an organisation
+    const checkOrgMembership = async (userId: string) => {
+        const { data } = await supabase
+            .from('organisation_members')
+            .select('id')
+            .eq('user_id', userId)
+            .limit(1)
+            .single()
+        return !!data
+    }
+
     // Check if user is already logged in
     useEffect(() => {
         let mounted = true
@@ -33,7 +44,9 @@ export default function LoginPage() {
             try {
                 const { data: { user } } = await supabase.auth.getUser()
                 if (mounted && user) {
-                    router.replace("/dashboard")
+                    // Check if user has an organisation
+                    const hasOrg = await checkOrgMembership(user.id)
+                    router.replace(hasOrg ? "/dashboard" : "/org/setup")
                 }
             } catch (error) {
                 console.error("Auth check error:", error)
@@ -102,8 +115,14 @@ export default function LoginPage() {
                 }
             } else {
                 showSuccess("Welcome back!")
-                // Use replace to prevent back navigation to login
-                router.replace("/dashboard")
+                // Check if user has an organisation
+                const { data: { user } } = await supabase.auth.getUser()
+                if (user) {
+                    const hasOrg = await checkOrgMembership(user.id)
+                    router.replace(hasOrg ? "/dashboard" : "/org/setup")
+                } else {
+                    router.replace("/dashboard")
+                }
             }
         } catch (error) {
             showError("An unexpected error occurred. Please try again.")
@@ -147,9 +166,9 @@ export default function LoginPage() {
                 if (data.user && !data.session) {
                     showSuccess("Success! Please check your email to confirm your account.")
                 } else {
-                    // Auto-confirmed, redirect to dashboard
+                    // Auto-confirmed, new users go to org setup
                     showSuccess("Account created successfully!")
-                    router.replace("/dashboard")
+                    router.replace("/org/setup")
                 }
             }
         } catch (error) {
