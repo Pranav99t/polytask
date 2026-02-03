@@ -1,0 +1,73 @@
+{
+    "app": {
+        "name": "PolyTask",
+        "tagline": "Multilingual Task Management",
+        "description": "Collaborative multilingual task management for global teams"
+    },
+    "common": {
+        "loading": "Loading...",
+        "save": "Save",
+        "cancel": "Cancel",
+        "delete": "Delete",
+        "edit": "Edit",
+        "create": "Create",
+        "search": "Search",
+        "filter": "Filter",
+        "sort": "Sort",
+        "noResults": "No results found"
+    },
+    "auth": {
+        "login": "Log in",
+        "logout": "Log out",
+        "signup": "Sign up",
+        "email": "Email",
+        "password": "Password",
+        "forgotPassword": "Forgot password?",
+        "signedIn": "Signed in"
+    },
+    "dashboard": {
+        "projects": "Projects",
+        "newProject": "New Project",
+        "noProjects": "No projects yet",
+        "createFirstProject": "Create your first project to get started",
+        "collaborativeBoards": "Collaborative task boards for your team"
+    },
+    "project": {
+        "name": "Project Name",
+        "description": "Description",
+        "createdOn": "Created on",
+        "members": "Members"
+    },
+    "task": {
+        "newTask": "New Task",
+        "title": "Title",
+        "description": "Description",
+        "status": "Status",
+        "assignee": "Assignee",
+        "dueDate": "Due Date",
+        "priority": "Priority",
+        "todo": "To Do",
+        "inProgress": "In Progress",
+        "done": "Done"
+    },
+    "comments": {
+        "title": "Comments",
+        "placeholder": "Type a comment...",
+        "noComments": "No comments yet",
+        "startConversation": "Start the conversation",
+        "autoTranslated": "Auto-translated to all team languages",
+        "translated": "Translated"
+    },
+    "organization": {
+        "team": "Team",
+        "members": "members",
+        "inviteMember": "Invite Member",
+        "settings": "Settings"
+    },
+    "errors": {
+        "generic": "Something went wrong",
+        "notFound": "Not found",
+        "unauthorized": "Unauthorized",
+        "networkError": "Network error"
+    }
+}
