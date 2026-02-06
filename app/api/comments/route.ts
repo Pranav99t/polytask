@@ -4,15 +4,22 @@ import { LingoDotDevEngine } from "lingo.dev/sdk";
 
 // Supabase client with service role for server operations
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseServiceKey) {
     console.warn("⚠️ SUPABASE_SERVICE_ROLE_KEY is not set!");
 }
 
+// Create service role client that bypasses RLS
 const supabase = createClient(
     supabaseUrl,
-    supabaseServiceKey || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    supabaseServiceKey || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+        auth: {
+            autoRefreshToken: false,
+            persistSession: false,
+        },
+    }
 );
 
 // Lingo.dev SDK for translations
@@ -93,11 +100,60 @@ export async function POST(request: Request) {
         const body = await request.json();
         const { taskId, content, userId } = body;
 
+        console.log("Creating comment:", { taskId, userId, contentLength: content?.length });
+
         if (!taskId || !content || !userId) {
             return NextResponse.json(
-                { error: "Missing required fields" },
+                { error: "Missing required fields: taskId, content, and userId are required" },
                 { status: 400 }
             );
+        }
+
+        // Validate that the task exists
+        const { data: task, error: taskError } = await supabase
+            .from("tasks")
+            .select("id")
+            .eq("id", taskId)
+            .single();
+
+        if (taskError || !task) {
+            console.error("Task not found:", taskError);
+            return NextResponse.json(
+                { error: "Task not found" },
+                { status: 404 }
+            );
+        }
+
+        // Validate that the user exists in auth.users (using service role)
+        // If user doesn't exist in public.users, try to create them
+        const { data: user, error: userError } = await supabase
+            .from("users")
+            .select("id")
+            .eq("id", userId)
+            .single();
+
+        if (userError || !user) {
+            // User doesn't exist in public.users - try to create them
+            // This can happen if the trigger on auth.users failed
+            console.log("User not in public.users, attempting to create...");
+
+            const { error: createError } = await supabase
+                .from("users")
+                .insert({
+                    id: userId,
+                    email: "unknown@user.local", // Will be updated by the user later
+                })
+                .select()
+                .single();
+
+            if (createError) {
+                // If it's a foreign key error, the userId is invalid
+                console.error("Failed to create user:", createError);
+                return NextResponse.json(
+                    { error: "Invalid user ID" },
+                    { status: 400 }
+                );
+            }
         }
 
         // 1. Insert the original comment
@@ -113,8 +169,13 @@ export async function POST(request: Request) {
 
         if (error) {
             console.error("Comment insert error:", error);
-            return NextResponse.json({ error: error.message }, { status: 500 });
+            return NextResponse.json(
+                { error: `Failed to create comment: ${error.message}` },
+                { status: 500 }
+            );
         }
+
+        console.log("Comment created successfully:", comment.id);
 
         // 2. Detect source language and translate to all locales
         const sourceLocale = detectSourceLanguage(content);
@@ -125,7 +186,6 @@ export async function POST(request: Request) {
             comment_id: comment.id,
             locale,
             translated_content: transContent,
-            updated_at: new Date().toISOString(),
         }));
 
         const { error: transError } = await supabase
@@ -140,8 +200,9 @@ export async function POST(request: Request) {
         return NextResponse.json({ success: true, comment });
     } catch (error) {
         console.error("API error:", error);
+        const errorMessage = error instanceof Error ? error.message : "Internal server error";
         return NextResponse.json(
-            { error: "Internal server error" },
+            { error: errorMessage },
             { status: 500 }
         );
     }
