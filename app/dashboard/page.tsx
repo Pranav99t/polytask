@@ -18,6 +18,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/components/ui/toast"
+import { useAuth } from "@/lib/hooks/useAuth"
 
 interface Organisation {
     id: string
@@ -58,6 +59,7 @@ export default function DashboardPage() {
     const [projects, setProjects] = useState<Project[]>([])
     const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
     const [loading, setLoading] = useState(true)
+    const [initialLoadComplete, setInitialLoadComplete] = useState(false)
 
     // Create project
     const [newProjectName, setNewProjectName] = useState("")
@@ -83,13 +85,24 @@ export default function DashboardPage() {
     const { showSuccess, showError, showLoading, hideToast } = useToast()
     const operationLockRef = useRef(false)
 
-    const fetchData = useCallback(async (showLoadingState = true) => {
-        try {
-            if (showLoadingState) setLoading(true)
+    // Use cached auth hook
+    const { userId, isAuthenticated, loading: authLoading, initialized: authInitialized } = useAuth()
 
-            const { data: { user } } = await supabase.auth.getUser()
-            if (!user) {
-                router.replace("/login")
+    const fetchData = useCallback(async (showLoadingState = true, currentUserId?: string | null) => {
+        // Use passed userId or rely on the hook
+        const userIdToUse = currentUserId ?? userId
+
+        // Only set loading if we don't have data yet
+        if (showLoadingState && !initialLoadComplete) {
+            setLoading(true)
+        }
+
+        try {
+            if (!userIdToUse) {
+                // Not authenticated yet, wait for auth to initialize
+                if (authInitialized && !isAuthenticated) {
+                    router.replace("/login")
+                }
                 return
             }
 
@@ -101,7 +114,7 @@ export default function DashboardPage() {
                     role,
                     organisations (id, name, slug, description, leader_id)
                 `)
-                .eq("user_id", user.id)
+                .eq("user_id", userIdToUse)
                 .limit(1)
                 .single()
 
@@ -112,44 +125,52 @@ export default function DashboardPage() {
             }
 
             const membership = memberships as unknown as OrganisationMembership
+
+            // Fetch projects and team members in PARALLEL
+            const [projectsResult, membersResult] = await Promise.all([
+                supabase
+                    .from("projects")
+                    .select("*")
+                    .eq("organisation_id", membership.organisation_id)
+                    .order("created_at", { ascending: false }),
+                supabase
+                    .from("organisation_members")
+                    .select(`
+                        user_id,
+                        role,
+                        users (id, email, full_name)
+                    `)
+                    .eq("organisation_id", membership.organisation_id)
+            ])
+
+            // Update state in batch to minimize re-renders
             setCurrentOrg(membership.organisations)
             setUserRole(membership.role)
-
-            // Fetch projects for this organisation
-            const { data: projectsData, error: projectsError } = await supabase
-                .from("projects")
-                .select("*")
-                .eq("organisation_id", membership.organisation_id)
-                .order("created_at", { ascending: false })
-
-            if (!projectsError) {
-                setProjects(projectsData || [])
+            if (!projectsResult.error) {
+                setProjects(projectsResult.data || [])
             }
-
-            // Fetch team members
-            const { data: members, error: membersError } = await supabase
-                .from("organisation_members")
-                .select(`
-                    user_id,
-                    role,
-                    users (id, email, full_name)
-                `)
-                .eq("organisation_id", membership.organisation_id)
-
-            if (!membersError) {
-                setTeamMembers(members as unknown as TeamMember[])
+            if (!membersResult.error) {
+                setTeamMembers(membersResult.data as unknown as TeamMember[])
             }
+            setInitialLoadComplete(true)
         } catch (error) {
             console.error("Fetch error:", error)
             showError("Failed to load dashboard")
         } finally {
             setLoading(false)
         }
-    }, [router, showError])
+    }, [userId, authInitialized, isAuthenticated, router, showError, initialLoadComplete])
 
+    // Fetch data when auth becomes available
     useEffect(() => {
-        fetchData()
-    }, [fetchData])
+        if (authInitialized) {
+            if (!isAuthenticated) {
+                router.replace("/login")
+            } else if (userId) {
+                fetchData(true, userId)
+            }
+        }
+    }, [authInitialized, isAuthenticated, userId, fetchData, router])
 
     // Close menu on outside click
     useEffect(() => {
@@ -405,7 +426,10 @@ export default function DashboardPage() {
 
     const canManageOrg = userRole === 'leader' || userRole === 'admin'
 
-    if (loading) {
+    // Show skeleton only during true initial load
+    const showSkeleton = (loading || !authInitialized) && !initialLoadComplete
+
+    if (showSkeleton) {
         return (
             <div className="p-8 max-w-7xl mx-auto">
                 <div className="animate-pulse space-y-8">
