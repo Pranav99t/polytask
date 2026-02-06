@@ -34,6 +34,7 @@ import {
 } from "lucide-react"
 import { useToast } from "@/components/ui/toast"
 import { CommentSection } from "@/components/shared/CommentSection"
+import { useAuth } from "@/lib/hooks/useAuth"
 
 interface Task {
     id: string
@@ -92,7 +93,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
     const [project, setProject] = useState<Project | null>(null)
     const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
     const [loading, setLoading] = useState(true)
-    const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+    const [initialLoadComplete, setInitialLoadComplete] = useState(false)
     const [userRole, setUserRole] = useState<'leader' | 'admin' | 'member'>('member')
 
     // Edit task
@@ -112,16 +113,24 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
     const { showSuccess, showError, showLoading, hideToast } = useToast()
     const operationLockRef = useRef(false)
 
-    const fetchData = useCallback(async (showLoadingState = true) => {
-        try {
-            if (showLoadingState) setLoading(true)
+    // Use cached auth hook
+    const { userId, isAuthenticated, initialized: authInitialized } = useAuth()
 
-            const { data: { user } } = await supabase.auth.getUser()
-            if (!user) {
-                router.replace("/login")
+    const fetchData = useCallback(async (showLoadingState = true, currentUserId?: string | null) => {
+        const userIdToUse = currentUserId ?? userId
+
+        // Only set loading if we don't have data yet
+        if (showLoadingState && !initialLoadComplete) {
+            setLoading(true)
+        }
+
+        try {
+            if (!userIdToUse) {
+                if (authInitialized && !isAuthenticated) {
+                    router.replace("/login")
+                }
                 return
             }
-            setCurrentUserId(user.id)
 
             // Fetch task and project in parallel
             const [taskResult, projectResult] = await Promise.all([
@@ -139,11 +148,13 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
 
             if (taskResult.error || !taskResult.data) {
                 console.error("Error fetching task:", taskResult.error)
+                setInitialLoadComplete(true)
                 setLoading(false)
                 return
             }
             if (projectResult.error || !projectResult.data) {
                 console.error("Error fetching project:", projectResult.error)
+                setInitialLoadComplete(true)
                 setLoading(false)
                 return
             }
@@ -165,23 +176,33 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
                 const teamMembers = members as unknown as TeamMember[]
                 setTeamMembers(teamMembers)
                 // Find current user's role
-                const currentMember = teamMembers.find(m => m.user_id === user.id)
+                const currentMember = teamMembers.find(m => m.user_id === userIdToUse)
                 if (currentMember) {
                     setUserRole(currentMember.role as 'leader' | 'admin' | 'member')
                 }
             }
+            setInitialLoadComplete(true)
         } catch (error) {
             console.error("Fetch error:", error)
             showError("Failed to load task")
         } finally {
             setLoading(false)
         }
-    }, [resolvedParams.taskId, resolvedParams.id, router, showError])
+    }, [resolvedParams.taskId, resolvedParams.id, userId, authInitialized, isAuthenticated, router, showError, initialLoadComplete])
 
+    // Fetch data when auth becomes available
     useEffect(() => {
-        fetchData()
+        if (authInitialized && userId) {
+            fetchData(true, userId)
+        } else if (authInitialized && !isAuthenticated) {
+            router.replace("/login")
+        }
+    }, [authInitialized, isAuthenticated, userId, fetchData, router])
 
-        // Subscribe to task updates
+    // Subscribe to realtime updates
+    useEffect(() => {
+        if (!initialLoadComplete) return
+
         const channel = supabase
             .channel(`task-${resolvedParams.taskId}`)
             .on(
@@ -200,7 +221,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
         return () => {
             supabase.removeChannel(channel)
         }
-    }, [resolvedParams.taskId, resolvedParams.id, fetchData, router])
+    }, [resolvedParams.taskId, resolvedParams.id, initialLoadComplete, router])
 
     const getMemberName = (userId: string | null) => {
         if (!userId) return 'Unassigned'
@@ -328,7 +349,10 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
         setEditOpen(true)
     }
 
-    if (loading) {
+    // Show skeleton only during true initial load
+    const showSkeleton = (loading || !authInitialized) && !initialLoadComplete
+
+    if (showSkeleton) {
         return (
             <div className="p-8 max-w-4xl mx-auto">
                 <div className="animate-pulse space-y-6">
@@ -357,7 +381,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string; tas
 
     // Permission checks
     const canManageProject = userRole === 'leader' || userRole === 'admin'
-    const isAssignedToTask = currentUserId === task.assigned_to
+    const isAssignedToTask = userId === task.assigned_to
     const canEditTask = canManageProject || isAssignedToTask
     const canDeleteTask = canManageProject
 
