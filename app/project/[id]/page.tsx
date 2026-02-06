@@ -38,6 +38,7 @@ import {
     User
 } from "lucide-react"
 import { useToast } from "@/components/ui/toast"
+import { useAuth } from "@/lib/hooks/useAuth"
 
 interface Task {
     id: string
@@ -98,7 +99,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const [tasks, setTasks] = useState<Task[]>([])
     const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
     const [loading, setLoading] = useState(true)
-    const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+    const [initialLoadComplete, setInitialLoadComplete] = useState(false)
     const [userRole, setUserRole] = useState<'leader' | 'admin' | 'member'>('member')
 
     // Create task
@@ -132,16 +133,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const { showSuccess, showError, showLoading, hideToast } = useToast()
     const operationLockRef = useRef(false)
 
-    const fetchProjectAndTasks = useCallback(async (showLoadingState = true) => {
-        try {
-            if (showLoadingState) setLoading(true)
+    // Use cached auth hook
+    const { userId, isAuthenticated, initialized: authInitialized } = useAuth()
 
-            const { data: { user } } = await supabase.auth.getUser()
-            if (!user) {
-                router.replace("/login")
+    const fetchProjectAndTasks = useCallback(async (showLoadingState = true, currentUserId?: string | null) => {
+        const userIdToUse = currentUserId ?? userId
+
+        // Only set loading if we don't have data yet
+        if (showLoadingState && !initialLoadComplete) {
+            setLoading(true)
+        }
+
+        try {
+            if (!userIdToUse) {
+                if (authInitialized && !isAuthenticated) {
+                    router.replace("/login")
+                }
                 return
             }
-            setCurrentUserId(user.id)
 
             // Fetch Project
             const { data: projectData, error: projectError } = await supabase
@@ -152,6 +161,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
             if (projectError || !projectData) {
                 console.error("Error fetching project:", projectError)
+                setInitialLoadComplete(true)
                 setLoading(false)
                 return
             }
@@ -181,23 +191,33 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 const members = membersResult.data as unknown as TeamMember[]
                 setTeamMembers(members)
                 // Find current user's role
-                const currentMember = members.find(m => m.user_id === user.id)
+                const currentMember = members.find(m => m.user_id === userIdToUse)
                 if (currentMember) {
                     setUserRole(currentMember.role as 'leader' | 'admin' | 'member')
                 }
             }
+            setInitialLoadComplete(true)
         } catch (error) {
             console.error("Fetch error:", error)
             showError("Failed to load project data")
         } finally {
             setLoading(false)
         }
-    }, [resolvedParams.id, router, showError])
+    }, [resolvedParams.id, userId, authInitialized, isAuthenticated, router, showError, initialLoadComplete])
 
+    // Fetch data when auth becomes available
     useEffect(() => {
-        fetchProjectAndTasks()
+        if (authInitialized && userId) {
+            fetchProjectAndTasks(true, userId)
+        } else if (authInitialized && !isAuthenticated) {
+            router.replace("/login")
+        }
+    }, [authInitialized, isAuthenticated, userId, fetchProjectAndTasks, router])
 
-        // Subscribe to tasks changes
+    // Subscribe to realtime updates
+    useEffect(() => {
+        if (!initialLoadComplete) return
+
         const channel = supabase
             .channel(`tasks-${resolvedParams.id}`)
             .on(
@@ -226,7 +246,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         return () => {
             supabase.removeChannel(channel)
         }
-    }, [resolvedParams.id, fetchProjectAndTasks])
+    }, [resolvedParams.id, initialLoadComplete])
 
     // Close menu on outside click
     useEffect(() => {
@@ -484,7 +504,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         'done': tasks.filter(t => t.status === 'done'),
     }
 
-    if (loading) {
+    // Show skeleton only during true initial load
+    const showSkeleton = (loading || !authInitialized) && !initialLoadComplete
+
+    if (showSkeleton) {
         return (
             <div className="p-8 max-w-7xl mx-auto">
                 <div className="animate-pulse space-y-8">
