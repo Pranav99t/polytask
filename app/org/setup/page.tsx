@@ -1,142 +1,122 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { useRouter } from "next/navigation"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea" // Fixed import
-
-import {
-    Building2,
-    Users,
-    ArrowRight,
-    Sparkles,
-    Globe,
-    Mail,
-    Check,
-    ArrowLeft
-} from "lucide-react"
+import { Building2, Users, Plus, ArrowRight, Mail } from "lucide-react"
 import { useToast } from "@/components/ui/toast"
 
-export default function OrgSetupPage() {
-    const [step, setStep] = useState<'choose' | 'create' | 'pending'>('choose')
-    const [loading, setLoading] = useState(false)
-    const [checkingAuth, setCheckingAuth] = useState(true)
-    const [pendingInvites, setPendingInvites] = useState<Array<{
-        id: string
-        organisation_id: string
-        organisations: { name: string; description: string | null }
-    }>>([])
+interface Invite {
+    id: string
+    organisation_id: string
+    organisations: {
+        name: string
+        description: string
+    }
+    invited_by: string
+    users: {
+        email: string
+        full_name: string
+    }
+}
 
-    // Create org form
+export default function OrganisationSetupPage() {
+    const [mode, setMode] = useState<'choose' | 'create' | 'invites'>('choose')
     const [orgName, setOrgName] = useState("")
-    const [orgDescription, setOrgDescription] = useState("")
+    const [orgDesc, setOrgDesc] = useState("")
+    const [loading, setLoading] = useState(false)
+    const [checkingInvites, setCheckingInvites] = useState(true)
+    const [pendingInvites, setPendingInvites] = useState<Invite[]>([])
     const [nameError, setNameError] = useState("")
-
     const router = useRouter()
     const { showSuccess, showError, showLoading, hideToast } = useToast()
-    const isSubmittingRef = useRef(false)
+    const operationLockRef = useRef(false)
 
-    // Check if user is authenticated and if they already have an org
-    useEffect(() => {
-        let mounted = true
-
-        const checkUser = async () => {
-            try {
-                const { data: { user } } = await supabase.auth.getUser()
-
-                if (!user) {
-                    router.replace("/login")
-                    return
-                }
-
-                // Check if user already has an organisation
-                const { data: membership } = await supabase
-                    .from('organisation_members')
-                    .select('id')
-                    .eq('user_id', user.id)
-                    .limit(1)
-                    .single()
-
-                if (membership) {
-                    router.replace("/dashboard")
-                    return
-                }
-
-                // Check for pending invites
-                const { data: invites } = await supabase
-                    .from('organisation_invites')
-                    .select(`
-                        id,
-                        organisation_id,
-                        organisations (name, description)
-                    `)
-                    .eq('email', user.email)
-                    .eq('status', 'pending')
-
-                if (mounted && invites && invites.length > 0) {
-                    setPendingInvites(invites as any)
-                    setStep('pending')
-                }
-            } catch (error) {
-                console.error("Auth check error:", error)
-            } finally {
-                if (mounted) {
-                    setCheckingAuth(false)
-                }
-            }
-        }
-
-        checkUser()
-
-        return () => { mounted = false }
-    }, [router])
-
-    const handleCreateOrg = async (e: React.FormEvent) => {
-        e.preventDefault()
-
-        if (isSubmittingRef.current || loading) return
-
-        if (!orgName.trim()) {
-            setNameError("Organisation name is required")
-            return
-        }
-
-        if (orgName.trim().length < 2) {
-            setNameError("Organisation name must be at least 2 characters")
-            return
-        }
-
-        isSubmittingRef.current = true
-        setLoading(true)
-        const loadingToast = showLoading("Creating your organisation...")
-
+    // Check for pending invites
+    const checkInvites = useCallback(async () => {
         try {
             const { data: { user } } = await supabase.auth.getUser()
-
             if (!user) {
-                hideToast(loadingToast)
-                router.replace("/login")
+                router.replace('/login')
                 return
             }
 
-            // Generate a unique slug from the org name
-            const slug = orgName.trim()
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, '-')
-                .replace(/^-|-$/g, '') +
-                '-' + Date.now().toString(36)
+            const { data: invites, error } = await supabase
+                .from('organisation_invites')
+                .select(`
+                    id,
+                    organisation_id,
+                    organisations (name, description),
+                    invited_by,
+                    users!organisation_invites_invited_by_fkey (email, full_name)
+                `)
+                .eq('email', user.email)
+                .eq('status', 'pending')
 
-            // Create the organisation
+            if (!error && invites && invites.length > 0) {
+                setPendingInvites(invites as unknown as Invite[])
+                setMode('invites')
+            }
+        } catch (error) {
+            console.error('Error checking invites:', error)
+        } finally {
+            setCheckingInvites(false)
+        }
+    }, [router])
+
+    useEffect(() => {
+        checkInvites()
+    }, [checkInvites])
+
+    const validateName = useCallback((name: string) => {
+        if (!name.trim()) {
+            setNameError("Organisation name is required")
+            return false
+        }
+        if (name.trim().length < 2) {
+            setNameError("Name must be at least 2 characters")
+            return false
+        }
+        if (name.trim().length > 50) {
+            setNameError("Name must be less than 50 characters")
+            return false
+        }
+        setNameError("")
+        return true
+    }, [])
+
+    const handleCreateOrganisation = async () => {
+        if (operationLockRef.current || loading) return
+        if (!validateName(orgName)) return
+
+        operationLockRef.current = true
+        setLoading(true)
+        const loadingToast = showLoading("Creating organisation...")
+
+        try {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) {
+                hideToast(loadingToast)
+                router.replace('/login')
+                return
+            }
+
+            // Generate slug from name
+            const slug = orgName.trim().toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-|-$/g, '')
+
+            // Create organisation
             const { data: org, error: orgError } = await supabase
                 .from('organisations')
                 .insert({
                     name: orgName.trim(),
-                    slug,
-                    description: orgDescription.trim() || null,
+                    slug: slug + '-' + Date.now().toString(36),
+                    description: orgDesc.trim() || null,
                     leader_id: user.id
                 })
                 .select()
@@ -148,7 +128,7 @@ export default function OrgSetupPage() {
                 return
             }
 
-            // Add the user as the leader/member
+            // Add creator as leader member
             const { error: memberError } = await supabase
                 .from('organisation_members')
                 .insert({
@@ -157,44 +137,41 @@ export default function OrgSetupPage() {
                     role: 'leader'
                 })
 
-            hideToast(loadingToast)
-
             if (memberError) {
+                hideToast(loadingToast)
                 showError(memberError.message)
-                // Rollback: delete the org if member creation fails
-                await supabase.from('organisations').delete().eq('id', org.id)
                 return
             }
 
+            hideToast(loadingToast)
             showSuccess("Organisation created successfully!")
-            router.replace("/dashboard")
+            router.replace('/dashboard')
         } catch (error) {
             hideToast(loadingToast)
-            showError("An unexpected error occurred. Please try again.")
-            console.error("Create org error:", error)
+            showError("An unexpected error occurred")
+            console.error('Create org error:', error)
         } finally {
             setLoading(false)
-            isSubmittingRef.current = false
+            operationLockRef.current = false
         }
     }
 
-    const handleAcceptInvite = async (invite: typeof pendingInvites[0]) => {
-        if (isSubmittingRef.current || loading) return
+    const handleAcceptInvite = async (invite: Invite) => {
+        if (operationLockRef.current || loading) return
 
-        isSubmittingRef.current = true
+        operationLockRef.current = true
         setLoading(true)
         const loadingToast = showLoading("Joining organisation...")
 
         try {
             const { data: { user } } = await supabase.auth.getUser()
-
             if (!user) {
                 hideToast(loadingToast)
-                router.replace("/login")
+                router.replace('/login')
                 return
             }
 
-            // Add user to organisation
+            // Add user as member
             const { error: memberError } = await supabase
                 .from('organisation_members')
                 .insert({
@@ -216,19 +193,19 @@ export default function OrgSetupPage() {
                 .eq('id', invite.id)
 
             hideToast(loadingToast)
-            showSuccess(`Welcome to ${invite.organisations.name}!`)
-            router.replace("/dashboard")
+            showSuccess(`Joined ${invite.organisations?.name || 'the organisation'}!`)
+            router.replace('/dashboard')
         } catch (error) {
             hideToast(loadingToast)
-            showError("An unexpected error occurred. Please try again.")
-            console.error("Accept invite error:", error)
+            showError("An unexpected error occurred")
+            console.error('Accept invite error:', error)
         } finally {
             setLoading(false)
-            isSubmittingRef.current = false
+            operationLockRef.current = false
         }
     }
 
-    const handleDeclineInvite = async (invite: typeof pendingInvites[0]) => {
+    const handleDeclineInvite = async (invite: Invite) => {
         try {
             await supabase
                 .from('organisation_invites')
@@ -236,21 +213,17 @@ export default function OrgSetupPage() {
                 .eq('id', invite.id)
 
             setPendingInvites(prev => prev.filter(i => i.id !== invite.id))
-
-            if (pendingInvites.length === 1) {
-                setStep('choose')
+            if (pendingInvites.length <= 1) {
+                setMode('choose')
             }
-
-            showSuccess("Invite declined")
         } catch (error) {
             showError("Failed to decline invite")
         }
     }
 
-    // Show loading while checking auth
-    if (checkingAuth) {
+    if (checkingInvites) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-slate-100">
                 <div className="flex flex-col items-center gap-4">
                     <div className="w-10 h-10 border-3 border-violet-500 border-t-transparent rounded-full animate-spin" />
                     <span className="text-gray-500">Loading...</span>
@@ -260,198 +233,149 @@ export default function OrgSetupPage() {
     }
 
     return (
-        <div className="min-h-screen flex items-center justify-center p-8 bg-gradient-to-br from-gray-50 via-white to-violet-50">
-            {/* Background decoration */}
-            <div className="fixed inset-0 overflow-hidden pointer-events-none">
-                <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-gradient-to-br from-violet-200/30 to-indigo-200/30 rounded-full blur-3xl" />
-                <div className="absolute bottom-0 left-0 w-[400px] h-[400px] bg-gradient-to-tr from-purple-200/30 to-pink-200/30 rounded-full blur-3xl" />
-            </div>
-
-            <div className="w-full max-w-lg relative z-10">
-                {/* Logo */}
-                <div className="flex items-center justify-center gap-3 mb-8">
-                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center text-white text-2xl font-bold shadow-lg">
-                        P
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 p-8">
+            <div className="max-w-2xl mx-auto pt-16">
+                {/* Header */}
+                <div className="text-center mb-12">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-violet-200">
+                        <Building2 className="w-8 h-8" />
                     </div>
-                    <span className="text-2xl font-bold bg-gradient-to-r from-violet-600 to-indigo-600 bg-clip-text text-transparent">
-                        PolyTask
-                    </span>
+                    <h1 className="text-3xl font-bold text-gray-900 mb-2">
+                        {mode === 'invites' ? 'You have pending invites!' : 'Set Up Your Workspace'}
+                    </h1>
+                    <p className="text-gray-500 max-w-md mx-auto">
+                        {mode === 'invites'
+                            ? 'Join an existing organisation or create your own'
+                            : 'Create or join an organisation to start collaborating with your team'
+                        }
+                    </p>
                 </div>
 
-                {/* Pending Invites View */}
-                {step === 'pending' && pendingInvites.length > 0 && (
-                    <div className="space-y-4">
-                        <div className="text-center mb-6">
-                            <h1 className="text-2xl font-bold text-gray-900 mb-2">
-                                You&apos;ve been invited!
-                            </h1>
-                            <p className="text-gray-500">
-                                Accept an invitation to join a team, or create your own organisation.
-                            </p>
-                        </div>
+                {/* Pending Invites */}
+                {mode === 'invites' && (
+                    <div className="space-y-4 mb-8">
+                        {pendingInvites.map(invite => {
+                            const orgName = invite.organisations?.name || 'Unknown Organisation'
+                            const orgDesc = invite.organisations?.description
+                            const inviterName = invite.users?.full_name || invite.users?.email || 'Someone'
 
-                        {pendingInvites.map(invite => (
-                            <Card key={invite.id} className="border-0 shadow-xl bg-white/80 backdrop-blur-sm">
-                                <CardHeader className="pb-2">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center text-white text-xl font-bold">
-                                            {invite.organisations.name.charAt(0).toUpperCase()}
-                                        </div>
-                                        <div>
-                                            <CardTitle className="text-lg">{invite.organisations.name}</CardTitle>
-                                            {invite.organisations.description && (
-                                                <CardDescription className="line-clamp-1">
-                                                    {invite.organisations.description}
+                            return (
+                                <Card key={invite.id} className="border-2 border-violet-200 bg-violet-50/50">
+                                    <CardHeader className="pb-2">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white font-bold shadow-md">
+                                                {orgName.charAt(0).toUpperCase()}
+                                            </div>
+                                            <div>
+                                                <CardTitle>{orgName}</CardTitle>
+                                                <CardDescription>
+                                                    Invited by {inviterName}
                                                 </CardDescription>
-                                            )}
+                                            </div>
                                         </div>
-                                    </div>
-                                </CardHeader>
-                                <CardContent className="flex gap-2">
-                                    <Button
-                                        onClick={() => handleAcceptInvite(invite)}
-                                        className="flex-1 bg-gradient-to-r from-violet-600 to-indigo-600"
-                                        disabled={loading}
-                                    >
-                                        <Check className="w-4 h-4 mr-2" />
-                                        Accept
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        onClick={() => handleDeclineInvite(invite)}
-                                        disabled={loading}
-                                    >
-                                        Decline
-                                    </Button>
-                                </CardContent>
-                            </Card>
-                        ))}
+                                    </CardHeader>
+                                    <CardContent className="pb-2">
+                                        {orgDesc && (
+                                            <p className="text-sm text-gray-600">{orgDesc}</p>
+                                        )}
+                                    </CardContent>
+                                    <CardFooter className="gap-2">
+                                        <Button
+                                            onClick={() => handleAcceptInvite(invite)}
+                                            disabled={loading}
+                                            className="bg-gradient-to-r from-violet-600 to-indigo-600"
+                                        >
+                                            {loading ? (
+                                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                            ) : (
+                                                <>Join Organisation</>
+                                            )}
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            onClick={() => handleDeclineInvite(invite)}
+                                            disabled={loading}
+                                        >
+                                            Decline
+                                        </Button>
+                                    </CardFooter>
+                                </Card>
+                            )
+                        })}
 
-                        <div className="relative my-6">
-                            <div className="absolute inset-0 flex items-center">
-                                <div className="w-full border-t border-gray-200" />
-                            </div>
-                            <div className="relative flex justify-center text-xs uppercase">
-                                <span className="bg-gradient-to-r from-gray-50 via-white to-violet-50 px-4 text-gray-500">
-                                    or
-                                </span>
-                            </div>
+                        <div className="text-center pt-4">
+                            <Button variant="ghost" onClick={() => setMode('choose')}>
+                                Or create your own organisation
+                            </Button>
                         </div>
-
-                        <Button
-                            variant="outline"
-                            className="w-full h-12"
-                            onClick={() => setStep('create')}
-                            disabled={loading}
-                        >
-                            <Building2 className="w-4 h-4 mr-2" />
-                            Create a new organisation instead
-                        </Button>
                     </div>
                 )}
 
-                {/* Choose Action View */}
-                {step === 'choose' && (
-                    <div className="space-y-4">
-                        <div className="text-center mb-8">
-                            <h1 className="text-2xl font-bold text-gray-900 mb-2">
-                                Welcome to PolyTask!
-                            </h1>
-                            <p className="text-gray-500">
-                                Create an organisation to start collaborating with your team.
-                            </p>
-                        </div>
-
+                {/* Choose Mode */}
+                {mode === 'choose' && (
+                    <div className="grid md:grid-cols-2 gap-6">
                         <Card
-                            className="border-0 shadow-xl bg-white/80 backdrop-blur-sm cursor-pointer hover:shadow-2xl transition-all duration-300 hover:scale-[1.02] group"
-                            onClick={() => setStep('create')}
+                            className="group cursor-pointer hover:shadow-xl hover:shadow-violet-100 transition-all duration-300 border-2 hover:border-violet-300"
+                            onClick={() => setMode('create')}
                         >
-                            <CardContent className="flex items-center gap-4 p-6">
-                                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform">
-                                    <Building2 className="w-7 h-7" />
+                            <CardHeader className="text-center">
+                                <div className="w-14 h-14 mx-auto mb-2 rounded-xl bg-gradient-to-br from-violet-100 to-indigo-100 flex items-center justify-center text-violet-600 group-hover:scale-110 transition-transform">
+                                    <Plus className="w-7 h-7" />
                                 </div>
-                                <div className="flex-1">
-                                    <h3 className="font-semibold text-gray-900 mb-1">Create Organisation</h3>
-                                    <p className="text-sm text-gray-500">
-                                        Start fresh and invite your team members
-                                    </p>
-                                </div>
-                                <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-violet-600 group-hover:translate-x-1 transition-all" />
-                            </CardContent>
+                                <CardTitle>Create Organisation</CardTitle>
+                                <CardDescription>
+                                    Start a new workspace for your team or company
+                                </CardDescription>
+                            </CardHeader>
+                            <CardFooter className="justify-center">
+                                <Button variant="ghost" className="gap-2 text-violet-600">
+                                    Get Started <ArrowRight className="w-4 h-4" />
+                                </Button>
+                            </CardFooter>
                         </Card>
 
-                        <Card className="border-0 shadow-lg bg-gradient-to-br from-amber-50 to-orange-50">
-                            <CardContent className="flex items-center gap-4 p-6">
-                                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center text-white shadow-lg">
+                        <Card className="border-2 border-dashed border-gray-200 bg-gray-50/50">
+                            <CardHeader className="text-center">
+                                <div className="w-14 h-14 mx-auto mb-2 rounded-xl bg-gray-100 flex items-center justify-center text-gray-400">
                                     <Mail className="w-7 h-7" />
                                 </div>
-                                <div className="flex-1">
-                                    <h3 className="font-semibold text-gray-900 mb-1">Waiting for an invite?</h3>
-                                    <p className="text-sm text-gray-600">
-                                        Ask your team leader to send you an invitation. You&apos;ll see it here automatically.
-                                    </p>
-                                </div>
-                            </CardContent>
+                                <CardTitle className="text-gray-600">Join via Invite</CardTitle>
+                                <CardDescription>
+                                    Ask your team leader to invite you using your email address
+                                </CardDescription>
+                            </CardHeader>
+                            <CardFooter className="justify-center">
+                                <p className="text-xs text-gray-400">
+                                    Invites will appear here automatically
+                                </p>
+                            </CardFooter>
                         </Card>
-
-                        {/* Features */}
-                        <div className="mt-8 grid grid-cols-3 gap-4 text-center">
-                            <div className="space-y-2">
-                                <div className="w-10 h-10 mx-auto rounded-lg bg-violet-100 flex items-center justify-center">
-                                    <Globe className="w-5 h-5 text-violet-600" />
-                                </div>
-                                <p className="text-xs text-gray-500">Multilingual</p>
-                            </div>
-                            <div className="space-y-2">
-                                <div className="w-10 h-10 mx-auto rounded-lg bg-indigo-100 flex items-center justify-center">
-                                    <Users className="w-5 h-5 text-indigo-600" />
-                                </div>
-                                <p className="text-xs text-gray-500">Team Collaboration</p>
-                            </div>
-                            <div className="space-y-2">
-                                <div className="w-10 h-10 mx-auto rounded-lg bg-purple-100 flex items-center justify-center">
-                                    <Sparkles className="w-5 h-5 text-purple-600" />
-                                </div>
-                                <p className="text-xs text-gray-500">AI Translation</p>
-                            </div>
-                        </div>
                     </div>
                 )}
 
                 {/* Create Organisation Form */}
-                {step === 'create' && (
-                    <Card className="border-0 shadow-xl bg-white/80 backdrop-blur-sm">
+                {mode === 'create' && (
+                    <Card className="border-0 shadow-xl">
                         <CardHeader>
-                            <div className="flex items-center gap-2">
-                                <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 rounded-full"
-                                    onClick={() => pendingInvites.length > 0 ? setStep('pending') : setStep('choose')}
-                                    disabled={loading}
-                                >
-                                    <ArrowLeft className="w-4 h-4" />
-                                </Button>
-                                <div>
-                                    <CardTitle>Create Organisation</CardTitle>
-                                    <CardDescription>
-                                        Set up your team&apos;s workspace
-                                    </CardDescription>
-                                </div>
-                            </div>
+                            <CardTitle>Create Your Organisation</CardTitle>
+                            <CardDescription>
+                                Set up your team workspace. You'll be able to invite members after creation.
+                            </CardDescription>
                         </CardHeader>
                         <CardContent>
-                            <form onSubmit={handleCreateOrg} className="space-y-4">
+                            <form onSubmit={(e) => { e.preventDefault(); handleCreateOrganisation(); }} className="space-y-4">
                                 <div className="space-y-2">
-                                    <Label htmlFor="org-name">Organisation Name *</Label>
+                                    <Label htmlFor="org-name">
+                                        Organisation Name <span className="text-red-500">*</span>
+                                    </Label>
                                     <Input
                                         id="org-name"
-                                        placeholder="Acme Corp"
                                         value={orgName}
                                         onChange={(e) => {
                                             setOrgName(e.target.value)
-                                            if (nameError) setNameError("")
+                                            if (nameError) validateName(e.target.value)
                                         }}
+                                        placeholder="e.g., Acme Corporation"
                                         className={nameError ? "border-red-500" : ""}
                                         disabled={loading}
                                         autoFocus
@@ -460,46 +384,44 @@ export default function OrgSetupPage() {
                                         <p className="text-sm text-red-500">{nameError}</p>
                                     )}
                                 </div>
-
                                 <div className="space-y-2">
                                     <Label htmlFor="org-desc">
-                                        Description <span className="text-gray-400">(optional)</span>
+                                        Description <span className="text-gray-400 text-sm">(optional)</span>
                                     </Label>
-                                    <Textarea
+                                    <Input
                                         id="org-desc"
+                                        value={orgDesc}
+                                        onChange={(e) => setOrgDesc(e.target.value)}
                                         placeholder="What does your organisation do?"
-                                        value={orgDescription}
-                                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setOrgDescription(e.target.value)}
                                         disabled={loading}
-                                        rows={3}
                                     />
                                 </div>
-
-                                <Button
-                                    type="submit"
-                                    className="w-full h-11 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700"
-                                    disabled={loading}
-                                >
-                                    {loading ? (
-                                        <span className="flex items-center gap-2">
-                                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                            Creating...
-                                        </span>
-                                    ) : (
-                                        <>
-                                            <Sparkles className="w-4 h-4 mr-2" />
-                                            Create Organisation
-                                        </>
-                                    )}
-                                </Button>
+                                <div className="flex justify-end gap-3 pt-4">
+                                    <Button type="button" variant="outline" onClick={() => setMode('choose')} disabled={loading}>
+                                        Back
+                                    </Button>
+                                    <Button
+                                        type="submit"
+                                        disabled={loading}
+                                        className="bg-gradient-to-r from-violet-600 to-indigo-600"
+                                    >
+                                        {loading ? (
+                                            <span className="flex items-center gap-2">
+                                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                                Creating...
+                                            </span>
+                                        ) : (
+                                            <>
+                                                <Building2 className="mr-2 h-4 w-4" />
+                                                Create Organisation
+                                            </>
+                                        )}
+                                    </Button>
+                                </div>
                             </form>
                         </CardContent>
                     </Card>
                 )}
-
-                <p className="text-center text-xs text-gray-400 mt-8">
-                    You can always change settings or invite members later.
-                </p>
             </div>
         </div>
     )
