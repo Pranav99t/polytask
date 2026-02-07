@@ -1,47 +1,71 @@
-# PolyTask - Multilingual Task Management
+# PolyTask 🌍
+### **Collaborative Multilingual Task Management Platform for Global Teams**
 
-A collaborative, multilingual task management web app for global teams built with Next.js, Supabase, and i18n support.
+![Next.js](https://img.shields.io/badge/Next.js-14+-black?style=for-the-badge&logo=next.js&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-Backend-green?style=for-the-badge&logo=supabase&logoColor=white)
+![Tailwind CSS](https://img.shields.io/badge/Tailwind-CSS-blue?style=for-the-badge&logo=tailwind-css&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript&logoColor=white)
 
-## 🌟 Features
+PolyTask is a real-time collaborative task management platform designed to break down language barriers. It automatically translates tasks, comments, and project details into each team member's preferred language, enabling seamless collaboration regardless of geographic or linguistic boundaries.
 
-- **Multilingual Support**: Seamless switching between English, Spanish, and Hindi
-- **Real-time Collaboration**: Live updates using Supabase Realtime
-- **Secure Authentication**: Email/password auth with Supabase
-- **Project Management**: Create and manage multiple projects
-- **Task Tracking**: Organize tasks with status tracking
-- **Comment System**: Real-time comments with auto-translation
-- **Responsive Design**: Works on desktop and mobile
+---
 
-## 🚀 Tech Stack
+## 🚀 Key Features
 
-- **Framework**: Next.js 14+ (App Router)
-- **Database**: Supabase (PostgreSQL)
-- **Authentication**: Supabase Auth
-- **Styling**: Tailwind CSS
-- **UI Components**: Shadcn UI
-- **i18n**: i18next & react-i18next
+### 🌍 **Automatic Information Translation**
+- **Instant Translation**: Every comment and task description is automatically translated into the viewer's native language.
+- **AI-Powered**: Powered by Lingo.dev for accurate, context-aware translations.
+- **Language Detection**: Automatically detects the source language of any message.
+
+
+### 📋 **Comprehensive Task Management**
+- **Kanban Board**: Drag-and-drop tasks between "To Do", "In Progress", and "Done".
+- **Rich Details**: Add descriptions, assignees, and detailed metadata to every task.
+- **Organization Support**: Create organizations, manage multiple projects, and invite team members.
+
+### 💬 **Multilingual Chat & Comments**
+- **Contextual Discussion**: Comment directly on tasks to keep conversations focused.
+- **Global Understanding**: User A types in English, User B reads in Hindi, User C reads in Spanish all instantly.
+
+### 🔐 **Enterprise-Grade Security**
+- **Role-Based Access**: Granular permissions for Leaders, Admins, and Members.
+- **Secure Auth**: Powered by Supabase Auth with Row Level Security (RLS) policies.
+
+---
+
+## 🛠️ Technology Stack
+
+- **Frontend**: [Next.js 16](https://nextjs.org/) (App Router), [React 19](https://react.dev/), [Tailwind CSS](https://tailwindcss.com/)
+- **Backend**: [Supabase](https://supabase.com/) (PostgreSQL, Realtime, Auth, Storage)
+- **AI & Translation**: [Lingo.dev](https://lingo.dev/) SDK
 - **Language**: TypeScript
+- **State Management**: React Query (Server State) & React Hooks
 
+---
 
-## 🎯 Usage
+## 🗄️ Database Schema
 
-1. Sign up with email and password
-2. Create a new project
-3. Add tasks to your project
-4. Switch languages using the dropdown
-5. Collaborate with real-time comments
+The core database structure consists of the following key tables:
 
-## 🌍 Supported Languages
+- **users**: Stores user profiles and authentication links.
+- **organisations**: Top-level grouping for teams.
+- **projects**: Workspaces within an organization.
+- **tasks**: Individual work items with status, assignee, and description.
+- **comments**: Discussion threads on tasks.
+- **comment_translations**: Real-time store for translated versions of every comment.
 
-- 🇬🇧 English
-- 🇪🇸 Spanish (Español)
-- 🇮🇳 Hindi (हिंदी)
-- More soon 
-
-## 👨‍💻 Author
-
-**Pranav** - [@Pranav99t](https://github.com/Pranav99t)
+---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Feel free to open issues or submit pull requests.
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the Branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
+
+---
+
+**Built with ❤️ by [Pranav](https://github.com/Pranav99t) for the Hackathon**
